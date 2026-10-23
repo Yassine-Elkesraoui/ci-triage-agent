@@ -1,0 +1,3 @@
+[submodule "lab"]
+	path = lab
+	url = https://github.com/Yassine-Elkesraoui/ci-triage-lab.git
