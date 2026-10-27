@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Store no token, so the public lab submodule below is fetched anonymously.
+          persist-credentials: false
+      # A full (non-shallow) clone: the replay layer reads lab/'s git log, diffs and old trees.
+      - name: Check out lab submodule
+        run: git submodule update --init
+      - name: Check lab history is complete
+        run: test "$(git -C lab rev-parse --is-shallow-repository)" = false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Run tests
+        run: pytest
