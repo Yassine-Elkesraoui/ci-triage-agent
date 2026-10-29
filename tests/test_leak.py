@@ -1,4 +1,4 @@
-"""LEAK TEST: nothing ReplaySource serves names a case, its label or the lab.
+"""LEAK TEST: nothing ReplaySource serves, directly or through the tools, names a case, its label or the lab.
 
 Strings are checked one by one rather than in a json.dumps() of the output,
 because JSON escaping would turn 'Revert "inject' into 'Revert \\"inject'.
@@ -10,10 +10,12 @@ import re
 from functools import lru_cache
 
 from conftest import CASES, LAB, LAB_DIR
+from tooling import exercise_everything
 
 from ci_triage.github_source import NotAvailable
 from ci_triage.replay import ReplaySource
 from ci_triage.replay.redaction import LABEL_MARKERS
+from ci_triage.tools import TOOLS, Toolkit
 
 DESCRIPTIONS = sorted(
     json.loads(path.read_text(encoding="utf-8"))["description"]
@@ -112,3 +114,13 @@ def test_redaction_is_load_bearing(case):
     raw_log = LAB.log_text(next(iter(j for j in LAB.log_paths if LAB.run_of_job[j] == case.eval_run_id)))
     assert leaks([("raw log", raw_log)])
     assert not leaks([("redacted run", ReplaySource(case, LAB).get_run(case.eval_run_id))])
+
+
+def test_no_label_leaks_through_the_tools(source, case):
+    """The same sweep through the Toolkit, every page of every log, patch and file included."""
+    toolkit = Toolkit(source)
+    outputs = [(where, result.model_dump()) for where, result in exercise_everything(toolkit, source, case)]
+    assert set(toolkit.call_counts()) == set(TOOLS)
+    assert not [call for call in toolkit.calls if call.error]
+    found = leaks(outputs)
+    assert not found, f"{len(found)} leak(s):\n{_report(found)}"
