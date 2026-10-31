@@ -8,12 +8,11 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
+from ci_triage.diagnosis import CATEGORIES
 from ci_triage.evaluation.ground_truth import GroundTruth, load_ground_truth
 from ci_triage.evaluation.key_evidence import key_evidence
 from ci_triage.replay import LabData, ReplaySource, load_cases, load_lab
 from ci_triage.tools import Toolkit, render
-
-CATEGORIES = ("real_regression", "flaky", "dependency", "environment", "timeout", "build")
 
 
 @dataclass(frozen=True)

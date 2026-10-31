@@ -4,7 +4,8 @@ An agent that triages failing GitHub Actions runs. It is developed and evaluated
 offline against [ci-triage-lab](https://github.com/Yassine-Elkesraoui/ci-triage-lab),
 pinned at v1.0 as the `lab/` submodule: 60 labelled CI failures in 6 categories.
 
-Status: milestones D1 (scaffold), D2 (replay layer) and D3 (tools). No LLM, no agent, no network.
+Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools) and D4 (diagnosis format and evaluation
+harness). No LLM, no agent, no network.
 
 ## Setup
 
@@ -21,6 +22,7 @@ pytest
 ```
 src/ci_triage/
   github_source.py      GitHubSource protocol, NotAvailable, TriageTarget
+  diagnosis.py          Diagnosis: what a predictor returns (category, step, file, evidence, fix, action)
   replay/               ReplaySource: offline GitHub served from lab/ data, labels hidden
     cases.py            the 60 cases from lab/injections/index.json (triage targets only)
     labdata.py          API snapshots, saved logs, job -> log index
@@ -31,15 +33,20 @@ src/ci_triage/
     github_tools.py     the eight tools and their registry
     failure_block.py    deterministic evidence extraction from a failed job's log
     text.py             log cleaning, line numbering, fitting output into the cap
-    toolkit.py          Toolkit: runs tools by name, never raises, records every call
-  evaluation/
+    toolkit.py          Toolkit: runs tools by name, never raises, records every call and its output
+  predictors/           predict(CaseView, Toolkit) -> Diagnosis; constant and random baselines
+  evaluation/           the only code that reads ground truth
     ground_truth.py     category, target file, mutation, revert commit (evaluation only)
     key_evidence.py     the evidence each case's failure block must contain
     failure_block_report.py  coverage and size of extract_failure_block per category
+    grader.py           grades one Diagnosis against ground truth and the case's tool call log
+    metrics.py          summary metrics and the Markdown report
+    run.py              runs a predictor over the 60 cases, writes results/<name>/
 tests/
+  oracle.py             the oracle predictor: reads ground truth, so it lives here only
 ```
 
-Neither `ReplaySource` nor the tools import `ci_triage.evaluation`; a test enforces it.
+Neither `ReplaySource`, the tools nor the predictors import `ci_triage.evaluation`; a test enforces it.
 
 ## Benchmark choices in the replay layer
 
@@ -79,3 +86,30 @@ with its Dockerfile excerpt, then returns them most important first with context
 trimmed to fit. `python -m ci_triage.evaluation.failure_block_report` prints how
 often its output holds each case's key evidence (the failing test, else the
 decisive error line).
+
+## Evaluation
+
+```bash
+python -m ci_triage.evaluation.run --predictor constant      # or random
+PYTHONPATH=tests python -m ci_triage.evaluation.run --predictor oracle:OraclePredictor
+```
+
+writes `results/<name>/cases.jsonl` (per case: the diagnosis, its grades and the tool call log) and
+`results/<name>/summary.md`. A predictor gets a `CaseView` (the run id only) and a fresh `Toolkit`
+per case. Per case the grader checks:
+
+- **category**, **failing step** (case and spacing ignored) and **suspect file** (the injection's target file);
+- **grounding**: each evidence quote must appear verbatim in a result the toolkit returned for that case,
+  from a tool of the quote's declared source (log: `get_job_log`, `extract_failure_block`; diff: `get_commit`,
+  `compare`; file: `get_file`; history: `list_runs`, `get_run`, `get_jobs`, `get_commit`). Line-number
+  prefixes are ignored, so a multi-line quote can match;
+- **fix match**: whether `suggested_fix` contains the lines the revert restored, whitespace normalised:
+  exact (all of them), partial (one line of 8+ characters, or every token the revert brought back), none.
+  22 reverts only delete what the injection added (a `timeout-minutes` line, an env block, a sleep); there
+  the deleted lines are what the fix must name;
+- **action**: the one recommended action that fits the true category (`ACTION_FOR` in `diagnosis.py`);
+- **tool calls** made.
+
+The summary adds accuracy, macro-F1, per-category scores, the confusion matrix and the Brier score of
+`confidence` against category correctness. Sanity predictors pin the grader: the oracle scores 100% on
+every metric, constant (always `real_regression`) exactly 10/60, random (seed 0) 9/60.

@@ -37,13 +37,15 @@ class NotAvailableResult(BaseModel):
 
 
 class ToolCall(BaseModel):
-    """One recorded call: what was asked and how much came back."""
+    """One recorded call: what was asked and what came back."""
 
     tool: str
     arguments: dict[str, Any]
     output_chars: int
     available: bool
     error: str | None = None  # internal exception, for debugging; never shown to the model
+    # The result as the model read it, for the grader's evidence check; left out of dumps.
+    output: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
 
 
 _OFFSET = "0-based index of the first line to return (lines to skip)."

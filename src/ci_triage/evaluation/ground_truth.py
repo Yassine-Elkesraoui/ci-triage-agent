@@ -23,10 +23,14 @@ class GroundTruth:
     find: str
     replace: str
     expected_failing_tests: tuple[str, ...]
+    failing_job: str  # the job's key in ci.yml ("smoke" or "docker")
+    failing_step: str  # the step's name as get_jobs shows it
     eval_run_id: int
     eval_commit_is_injection: bool
     injection_commit: str  # full sha
     revert_commit: str | None  # full sha of the commit that reverted the injection
+    restored: tuple[str, ...]  # lines the revert put back in target_file
+    removed: tuple[str, ...]  # lines the revert took out of target_file
 
 
 def _reverts(git: Git) -> dict[str, str]:
@@ -40,6 +44,18 @@ def _reverts(git: Git) -> dict[str, str]:
     return reverts
 
 
+def _revert_lines(git: Git, revert: str | None, path: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(added, removed) lines of ``path`` in the revert commit, leaving out lines on both sides
+    (inj-001's revert re-adds an unchanged line to restore the newline at the end of the file)."""
+    if revert is None:
+        return (), ()
+    diff = git.text("show", "--format=", "--unified=0", "--no-color", revert, "--", path).splitlines()
+    added = [line[1:] for line in diff if line.startswith("+") and not line.startswith("+++")]
+    removed = [line[1:] for line in diff if line.startswith("-") and not line.startswith("---")]
+    both = set(added) & set(removed)
+    return tuple(line for line in added if line not in both), tuple(line for line in removed if line not in both)
+
+
 def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
     root = Path(lab_dir or default_lab_dir())
     git = Git(root)
@@ -49,6 +65,8 @@ def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
     for entry in index["cases"]:
         spec = json.loads((root / "injections" / "specs" / f"{entry['id']}.json").read_text(encoding="utf-8"))
         injection = git.resolve_commit(entry["injection_commit"])
+        revert = reverts.get(injection)
+        restored, removed = _revert_lines(git, revert, entry["target_file"])
         truths[entry["id"]] = GroundTruth(
             case_id=entry["id"],
             category=entry["category"],
@@ -57,9 +75,13 @@ def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
             find=spec["find"],
             replace=spec["replace"],
             expected_failing_tests=tuple(entry["expected_failing_tests"]),
+            failing_job=entry["observed_failing_job"],
+            failing_step=entry["failing_step"],
             eval_run_id=int(entry["eval_run_id"]),
             eval_commit_is_injection=entry["eval_commit_is_injection"],
             injection_commit=injection,
-            revert_commit=reverts.get(injection),
+            revert_commit=revert,
+            restored=restored,
+            removed=removed,
         )
     return truths

@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Evaluation runs (python -m ci_triage.evaluation.run); official reports go in reports/
+results/

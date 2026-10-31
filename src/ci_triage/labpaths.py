@@ -1,4 +1,4 @@
-"""Where the ci-triage-lab submodule lives."""
+"""Where the ci-triage-lab submodule lives, and where evaluation results go."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+RESULTS_DIR = REPO_ROOT / "results"
 
 
 def default_lab_dir() -> Path:

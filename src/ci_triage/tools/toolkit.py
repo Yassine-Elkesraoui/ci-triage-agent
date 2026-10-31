@@ -43,7 +43,8 @@ class Toolkit:
             error = error or f"output of {size} chars exceeded the cap"
             size = len(render(result))
         self.calls.append(ToolCall(tool=str(name), arguments=recorded, output_chars=size,
-                                   available=result.available, error=error))
+                                   available=result.available, error=error,
+                                   output=result.model_dump(mode="json", exclude_none=True)))
         return result
 
     def call_json(self, name: str, arguments: Mapping[str, Any] | None = None) -> str:
