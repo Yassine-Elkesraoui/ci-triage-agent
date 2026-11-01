@@ -4,8 +4,8 @@ An agent that triages failing GitHub Actions runs. It is developed and evaluated
 offline against [ci-triage-lab](https://github.com/Yassine-Elkesraoui/ci-triage-lab),
 pinned at v1.0 as the `lab/` submodule: 60 labelled CI failures in 6 categories.
 
-Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools) and D4 (diagnosis format and evaluation
-harness). No LLM, no agent, no network.
+Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools), D4 (diagnosis format and evaluation
+harness) and D5a (a rules-only baseline, committed before its first evaluation). No LLM, no agent, no network.
 
 ## Setup
 
@@ -35,6 +35,7 @@ src/ci_triage/
     text.py             log cleaning, line numbering, fitting output into the cap
     toolkit.py          Toolkit: runs tools by name, never raises, records every call and its output
   predictors/           predict(CaseView, Toolkit) -> Diagnosis; constant and random baselines
+    rules.py            rules-only baseline (no LLM): its decision table is in the module docstring
   evaluation/           the only code that reads ground truth
     ground_truth.py     category, target file, mutation, revert commit (evaluation only)
     key_evidence.py     the evidence each case's failure block must contain

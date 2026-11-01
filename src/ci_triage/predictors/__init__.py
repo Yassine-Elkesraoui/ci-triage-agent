@@ -2,8 +2,9 @@
 
 from ci_triage.predictors.base import CaseView, Predictor
 from ci_triage.predictors.baselines import ConstantPredictor, RandomPredictor
+from ci_triage.predictors.rules import RulesPredictor
 
 # Predictors the runner knows by name; others load as "module:attribute".
-PREDICTORS = {"constant": ConstantPredictor, "random": RandomPredictor}
+PREDICTORS = {"constant": ConstantPredictor, "random": RandomPredictor, "rules": RulesPredictor}
 
-__all__ = ["PREDICTORS", "CaseView", "ConstantPredictor", "Predictor", "RandomPredictor"]
+__all__ = ["PREDICTORS", "CaseView", "ConstantPredictor", "Predictor", "RandomPredictor", "RulesPredictor"]
