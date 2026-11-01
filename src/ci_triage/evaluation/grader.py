@@ -1,6 +1,7 @@
 """Grades one Diagnosis against a case's ground truth and the toolkit calls that produced it.
 
 - category, failing_step (case and spacing ignored), suspect_file (the injection's target file);
+- failing_job: the failed job's name as get_jobs shows it (case and spacing ignored);
 - evidence grounding: a quote counts only if it appears verbatim in a string the toolkit returned
   for this case, from a tool of its declared source (``SOURCE_TOOLS``). Log, file and patch pages
   number their lines, so each string is also searched with the "<n>| " prefixes removed, which lets
@@ -46,6 +47,7 @@ class CaseResult(BaseModel):
     confidence: float  # 0 when the predictor raised
     category_correct: bool
     step_correct: bool
+    job_correct: bool
     file_correct: bool
     quotes: int
     quotes_grounded: int
@@ -54,6 +56,7 @@ class CaseResult(BaseModel):
     fix_match: FixMatch
     action_correct: bool
     tool_calls: int
+    wall_time_s: float = 0.0  # time the predictor took on this case
     error: str | None = None
     diagnosis: Diagnosis | None
     calls: list[ToolCall]
@@ -136,14 +139,15 @@ def _same_name(a: str, b: str) -> bool:
 
 
 def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[ToolCall],
-               error: str | None = None) -> CaseResult:
+               error: str | None = None, wall_time_s: float = 0.0) -> CaseResult:
     true_category = Category(truth.category)
     kind = fix_target(truth)[0]
     if diagnosis is None:
         return CaseResult(case_id=truth.case_id, true_category=true_category, predicted_category=None, confidence=0.0,
-                          category_correct=False, step_correct=False, file_correct=False, quotes=0,
-                          quotes_grounded=0, evidence_grounded=False, fix_kind=kind, fix_match="none",
-                          action_correct=False, tool_calls=len(calls), error=error, diagnosis=None, calls=list(calls))
+                          category_correct=False, step_correct=False, job_correct=False, file_correct=False,
+                          quotes=0, quotes_grounded=0, evidence_grounded=False, fix_kind=kind, fix_match="none",
+                          action_correct=False, tool_calls=len(calls), wall_time_s=wall_time_s, error=error,
+                          diagnosis=None, calls=list(calls))
     grounded = sum(is_grounded(evidence, calls) for evidence in diagnosis.evidence)
     return CaseResult(
         case_id=truth.case_id,
@@ -152,6 +156,7 @@ def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[
         confidence=diagnosis.confidence,
         category_correct=diagnosis.category == true_category,
         step_correct=_same_name(diagnosis.failing_step, truth.failing_step),
+        job_correct=_same_name(diagnosis.failing_job, truth.failing_job_name),
         file_correct=_same_path(diagnosis.suspect_file, truth.target_file),
         quotes=len(diagnosis.evidence),
         quotes_grounded=grounded,
@@ -160,6 +165,7 @@ def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[
         fix_match=fix_match(diagnosis.suggested_fix, truth),
         action_correct=diagnosis.recommended_action == ACTION_FOR[true_category],
         tool_calls=len(calls),
+        wall_time_s=wall_time_s,
         error=error,
         diagnosis=diagnosis,
         calls=list(calls),

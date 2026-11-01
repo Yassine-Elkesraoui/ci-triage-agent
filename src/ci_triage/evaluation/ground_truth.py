@@ -24,6 +24,7 @@ class GroundTruth:
     replace: str
     expected_failing_tests: tuple[str, ...]
     failing_job: str  # the job's key in ci.yml ("smoke" or "docker")
+    failing_job_name: str  # its name as get_jobs shows it: ci.yml's name: at the eval commit, else the key
     failing_step: str  # the step's name as get_jobs shows it
     eval_run_id: int
     eval_commit_is_injection: bool
@@ -56,6 +57,27 @@ def _revert_lines(git: Git, revert: str | None, path: str) -> tuple[tuple[str, .
     return tuple(line for line in added if line not in both), tuple(line for line in removed if line not in both)
 
 
+def job_names(workflow: str) -> dict[str, str]:
+    """Job key -> display name (its ``name:``, else the key) in a workflow file indented by two spaces,
+    like the lab's ci.yml; no YAML library needed."""
+    names: dict[str, str] = {}
+    in_jobs, key = False, None
+    for line in workflow.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            in_jobs = line.split("#", 1)[0].strip() == "jobs:"
+            key = None
+        elif in_jobs and (match := re.match(r"^  ([\w-]+):\s*$", line)):
+            key = match[1]
+            names[key] = key
+        elif in_jobs and key and (match := re.match(r"^    name:\s*(.+?)\s*$", line)):
+            value = match[1]
+            quoted = len(value) >= 2 and value[0] == value[-1] and value[0] in "'\""
+            names[key] = value[1:-1] if quoted else value
+    return names
+
+
 def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
     root = Path(lab_dir or default_lab_dir())
     git = Git(root)
@@ -67,6 +89,8 @@ def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
         injection = git.resolve_commit(entry["injection_commit"])
         revert = reverts.get(injection)
         restored, removed = _revert_lines(git, revert, entry["target_file"])
+        eval_commit = git.resolve_commit(entry["eval_commit"])
+        jobs = job_names(git.text("show", f"{eval_commit}:.github/workflows/ci.yml"))
         truths[entry["id"]] = GroundTruth(
             case_id=entry["id"],
             category=entry["category"],
@@ -76,6 +100,7 @@ def load_ground_truth(lab_dir: Path | None = None) -> dict[str, GroundTruth]:
             replace=spec["replace"],
             expected_failing_tests=tuple(entry["expected_failing_tests"]),
             failing_job=entry["observed_failing_job"],
+            failing_job_name=jobs[entry["observed_failing_job"]],
             failing_step=entry["failing_step"],
             eval_run_id=int(entry["eval_run_id"]),
             eval_commit_is_injection=entry["eval_commit_is_injection"],

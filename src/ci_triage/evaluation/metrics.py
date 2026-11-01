@@ -48,6 +48,10 @@ class Summary:
     errors: int
     per_category: dict[str, CategoryScore]
     confusion: dict[str, dict[str, int]]  # true -> predicted -> count
+    job_rate: float = 0.0  # failing_job correct
+    mean_wall_time_s: float = 0.0  # per case
+    max_wall_time_s: float = 0.0
+    mode: str = "full"  # evaluation mode, see ci_triage.tools.modes
 
 
 def _rate(group: Sequence[CaseResult], hit: Callable[[CaseResult], bool]) -> float:
@@ -58,7 +62,7 @@ def _ratio(a: int, b: int) -> float:
     return a / b if b else 0.0
 
 
-def summarise(predictor: str, results: Sequence[CaseResult]) -> Summary:
+def summarise(predictor: str, results: Sequence[CaseResult], mode: str = "full") -> Summary:
     columns = [*CATEGORIES, NO_DIAGNOSIS]
     confusion = {true: dict.fromkeys(columns, 0) for true in CATEGORIES}
     for r in results:
@@ -102,6 +106,10 @@ def summarise(predictor: str, results: Sequence[CaseResult]) -> Summary:
         errors=sum(r.error is not None for r in results),
         per_category=per_category,
         confusion=confusion,
+        job_rate=_rate(results, lambda r: r.job_correct),
+        mean_wall_time_s=_ratio(sum(r.wall_time_s for r in results), len(results)),
+        max_wall_time_s=max((r.wall_time_s for r in results), default=0.0),
+        mode=str(mode),
     )
 
 
@@ -112,7 +120,7 @@ def _pct(value: float) -> str:
 def to_markdown(summary: Summary) -> str:
     s = summary
     lines = [
-        f"# Evaluation: {s.predictor}",
+        f"# Evaluation: {s.predictor}" + (f" ({s.mode} mode)" if s.mode != "full" else ""),
         "",
         f"{s.cases} cases" + (f", {s.errors} with no diagnosis (the predictor raised)" if s.errors else "") + ".",
         "",
@@ -129,6 +137,8 @@ def to_markdown(summary: Summary) -> str:
         f"| action consistent with category | {_pct(s.action_rate)} |",
         f"| mean tool calls | {s.mean_tool_calls:.2f} |",
         f"| Brier score (lower is better) | {s.brier:.4f} |",
+        f"| failing job correct | {_pct(s.job_rate)} |",
+        f"| wall time per case, mean / max | {s.mean_wall_time_s:.3f} s / {s.max_wall_time_s:.3f} s |",
         "",
         "## Per category",
         "",

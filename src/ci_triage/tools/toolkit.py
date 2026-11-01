@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from ci_triage.github_source import GitHubSource
-from ci_triage.tools.github_tools import TOOLS
+from ci_triage.tools.github_tools import TOOLS, tool_definitions
 from ci_triage.tools.models import NotAvailableResult, ToolCall
 from ci_triage.tools.text import MAX_OUTPUT_CHARS, render
 
@@ -21,12 +21,22 @@ def _validation_summary(error: ValidationError) -> str:
 
 
 class Toolkit:
-    """The tools of ``TOOLS`` bound to ``source``, with a per-call output cap of ``max_chars``."""
+    """The tools of ``TOOLS`` bound to ``source``, with a per-call output cap of ``max_chars``.
 
-    def __init__(self, source: GitHubSource, max_chars: int = MAX_OUTPUT_CHARS) -> None:
+    ``unavailable`` maps tool names to the reason they are switched off (an evaluation mode,
+    see ``ci_triage.tools.modes``): calling one returns that reason as a ``NotAvailableResult``.
+    """
+
+    def __init__(self, source: GitHubSource, max_chars: int = MAX_OUTPUT_CHARS,
+                 unavailable: Mapping[str, str] | None = None) -> None:
         self.source = source
         self.max_chars = max_chars
+        self.unavailable: dict[str, str] = dict(unavailable or {})
         self.calls: list[ToolCall] = []
+
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        """The definitions of the tools this toolkit offers (switched-off tools left out)."""
+        return tool_definitions(exclude=self.unavailable)
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> BaseModel:
         """Run tool ``name``: its output model, or a ``NotAvailableResult``; never raises."""
@@ -52,6 +62,8 @@ class Toolkit:
         return render(self.call(name, arguments))
 
     def _run(self, name: str, arguments: Mapping[str, Any] | None) -> BaseModel:
+        if isinstance(name, str) and name in self.unavailable:
+            return _not_available(f"tool {name!r}", self.unavailable[name])
         tool = TOOLS.get(name) if isinstance(name, str) else None
         if tool is None:
             return _not_available(f"tool {name!r}", f"unknown tool; tools are: {', '.join(TOOLS)}")

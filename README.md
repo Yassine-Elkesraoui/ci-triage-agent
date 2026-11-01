@@ -5,7 +5,8 @@ offline against [ci-triage-lab](https://github.com/Yassine-Elkesraoui/ci-triage-
 pinned at v1.0 as the `lab/` submodule: 60 labelled CI failures in 6 categories.
 
 Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools), D4 (diagnosis format and evaluation
-harness) and D5a (a rules-only baseline, committed before its first evaluation). No LLM, no agent, no network.
+harness), D5a (a rules-only baseline, committed before its first evaluation), D5b (its first score, in
+`reports/`) and D5c (the log-only evaluation mode). No LLM, no agent, no network.
 
 ## Setup
 
@@ -34,6 +35,7 @@ src/ci_triage/
     failure_block.py    deterministic evidence extraction from a failed job's log
     text.py             log cleaning, line numbering, fitting output into the cap
     toolkit.py          Toolkit: runs tools by name, never raises, records every call and its output
+    modes.py            evaluation modes: full, and log-only (no diffs, files only at the eval commit)
   predictors/           predict(CaseView, Toolkit) -> Diagnosis; constant and random baselines
     rules.py            rules-only baseline (no LLM): its decision table is in the module docstring
   evaluation/           the only code that reads ground truth
@@ -42,7 +44,8 @@ src/ci_triage/
     failure_block_report.py  coverage and size of extract_failure_block per category
     grader.py           grades one Diagnosis against ground truth and the case's tool call log
     metrics.py          summary metrics and the Markdown report
-    run.py              runs a predictor over the 60 cases, writes results/<name>/
+    run.py              runs a predictor over the 60 cases in a mode, writes results/<name>[-log-only]/
+reports/                official scores, committed (results/ is gitignored run output)
 tests/
   oracle.py             the oracle predictor: reads ground truth, so it lives here only
 ```
@@ -91,15 +94,18 @@ decisive error line).
 ## Evaluation
 
 ```bash
-python -m ci_triage.evaluation.run --predictor constant      # or random
+python -m ci_triage.evaluation.run --predictor constant      # or random, rules
+python -m ci_triage.evaluation.run --predictor rules --mode log-only
 PYTHONPATH=tests python -m ci_triage.evaluation.run --predictor oracle:OraclePredictor
 ```
 
-writes `results/<name>/cases.jsonl` (per case: the diagnosis, its grades and the tool call log) and
-`results/<name>/summary.md`. A predictor gets a `CaseView` (the run id only) and a fresh `Toolkit`
-per case. Per case the grader checks:
+writes `results/<name>/cases.jsonl` (per case: the diagnosis, its grades, the tool call log and the
+predictor's wall time) and `results/<name>/summary.md`; `--mode log-only` writes to
+`results/<name>-log-only/`. A predictor gets a `CaseView` (the run id only) and a fresh `Toolkit` per
+case, built for the mode. Per case the grader checks:
 
-- **category**, **failing step** (case and spacing ignored) and **suspect file** (the injection's target file);
+- **category**, **failing job** and **failing step** (as `get_jobs` names them, case and spacing ignored)
+  and **suspect file** (the injection's target file);
 - **grounding**: each evidence quote must appear verbatim in a result the toolkit returned for that case,
   from a tool of the quote's declared source (log: `get_job_log`, `extract_failure_block`; diff: `get_commit`,
   `compare`; file: `get_file`; history: `list_runs`, `get_run`, `get_jobs`, `get_commit`). Line-number
@@ -111,6 +117,26 @@ per case. Per case the grader checks:
 - **action**: the one recommended action that fits the true category (`ACTION_FOR` in `diagnosis.py`);
 - **tool calls** made.
 
-The summary adds accuracy, macro-F1, per-category scores, the confusion matrix and the Brier score of
-`confidence` against category correctness. Sanity predictors pin the grader: the oracle scores 100% on
-every metric, constant (always `real_regression`) exactly 10/60, random (seed 0) 9/60.
+The summary adds accuracy, macro-F1, per-category scores, the confusion matrix, the Brier score of
+`confidence` against category correctness, and mean and max wall time per case. Sanity predictors pin
+the grader: the oracle scores 100% on every metric, constant (always `real_regression`) exactly 10/60,
+random (seed 0) 9/60.
+
+### Evaluation modes
+
+- **full** (default): every tool, within the case scope above.
+- **log-only**: the toolkit does not reveal what changed. `get_commit` and `compare`, the commit-diff
+  and patch tools, return `"not available in log-only mode"` and are left out of `tool_definitions()`.
+  `get_file` reads only the commit under triage: `ref` omitted, `HEAD`, or its sha; any other ref,
+  including the baseline and parents, is refused. Runs, jobs, logs, `extract_failure_block`, files at the
+  eval commit and run history stay. It is enforced twice, by the toolkit and by `LogOnlySource`
+  (`tools/modes.py`). `tests/test_log_only.py` drives every remaining tool over every case, and checks
+  that no output holds a diff field, diff text or a line the injection removed.
+
+Why log-only exists: real triage often has no usable diff. The PR is large and touches many files, the
+failure is on a scheduled run, or the alert arrives with no access to the change. In full mode, the
+lab's `compare(baseline, eval)` shows exactly one injected change, which makes the suspect file and the
+fix nearly free. It was designed after D5b showed full mode is near ceiling: the rules baseline scores
+58/60, with 100% localisation and exact fix match (`reports/d5b-rules-v1.md`). So **log-only is the
+headline comparison for D6**, the LLM agent. That choice is registered here, in D5c, before any LLM
+run. Full-mode results are still reported alongside.

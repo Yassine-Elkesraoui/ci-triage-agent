@@ -7,7 +7,7 @@ raise for missing data (``Toolkit`` also catches anything unexpected).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -366,5 +366,6 @@ TOOLS: dict[str, Tool] = {
 }
 
 
-def tool_definitions() -> list[dict[str, Any]]:
-    return [tool.definition() for tool in TOOLS.values()]
+def tool_definitions(exclude: Iterable[str] = ()) -> list[dict[str, Any]]:
+    excluded = set(exclude)
+    return [tool.definition() for tool in TOOLS.values() if tool.name not in excluded]

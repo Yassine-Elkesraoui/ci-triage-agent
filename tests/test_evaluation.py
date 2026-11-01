@@ -17,11 +17,12 @@ from pydantic import ValidationError
 
 from ci_triage.diagnosis import ACTION_FOR, CATEGORIES, Category, Diagnosis, Evidence, EvidenceSource, RecommendedAction
 from ci_triage.evaluation.grader import fix_match, grade_case, is_grounded, normalise
+from ci_triage.evaluation.ground_truth import job_names
 from ci_triage.evaluation.metrics import summarise
 from ci_triage.evaluation.run import evaluate, load_predictor, main, write_results
 from ci_triage.predictors import CaseView, ConstantPredictor, Predictor, RandomPredictor
 from ci_triage.replay import ReplaySource
-from ci_triage.tools import Toolkit
+from ci_triage.tools import LOG_ONLY_REASON, Mode, Toolkit
 
 CASE = {case.case_id: case for case in CASES}
 
@@ -85,6 +86,18 @@ def test_failing_step_is_a_step_of_the_failed_job(case, source, truth):
     jobs = Toolkit(source).call("get_jobs", {"run_id": case.eval_run_id})
     failed = [job for job in jobs.jobs if job.conclusion in ("failure", "cancelled")]
     assert truth[case.case_id].failing_step in {step.name for job in failed for step in job.steps}
+
+
+def test_failing_job_name_is_the_failed_job_as_get_jobs_shows_it(case, source, truth):
+    jobs = Toolkit(source).call("get_jobs", {"run_id": case.eval_run_id})
+    failed = [job.name for job in jobs.jobs if job.conclusion in ("failure", "cancelled")]
+    assert failed == [truth[case.case_id].failing_job_name]
+
+
+def test_job_names():
+    workflow = ("name: CI\non: push\njobs:\n  smoke:\n    name: Smoke tests\n    steps:\n      - name: x\n"
+                "  docker:\n    needs: smoke\n  lint:\n    name: 'Lint (ruff)'\nenv:\n  name: not-a-job\n")
+    assert job_names(workflow) == {"smoke": "Smoke tests", "docker": "docker", "lint": "Lint (ruff)"}
 
 
 def test_every_revert_restores_or_removes_something(truth):
@@ -175,6 +188,9 @@ def test_oracle_scores_100_percent_on_every_metric(oracle_results):
     assert all(c.precision == c.recall == c.f1 == 1.0 for c in s.per_category.values())
     assert all(s.confusion[c][p] == (10 if c == p else 0) for c in CATEGORIES for p in CATEGORIES)
     assert s.mean_tool_calls == 2.0 and all(len(r.calls) == r.tool_calls == 2 for r in oracle_results)
+    assert s.job_rate == 1.0 and all(r.job_correct for r in oracle_results)
+    assert all(r.wall_time_s > 0 for r in oracle_results)
+    assert s.mean_wall_time_s > 0 and s.max_wall_time_s >= s.mean_wall_time_s
 
 
 def test_constant_scores_exactly_10_of_60(constant_results):
@@ -185,6 +201,7 @@ def test_constant_scores_exactly_10_of_60(constant_results):
     assert all(row == {**dict.fromkeys(row, 0), "real_regression": 10} for row in s.confusion.values())
     assert s.action_rate == pytest.approx(10 / 60)
     assert s.step_rate == s.localisation_rate == s.grounding_rate == s.fix_exact_rate == s.mean_tool_calls == 0
+    assert s.job_rate == 0  # "unknown"
     assert s.brier == pytest.approx((10 * (5 / 6) ** 2 + 50 * (1 / 6) ** 2) / 60)
 
 
@@ -230,8 +247,10 @@ def test_runner_writes_cases_and_summary(tmp_path, constant_results):
     assert [row["case_id"] for row in rows] == [case.case_id for case in CASES]
     assert Counter(row["category_correct"] for row in rows) == {False: 50, True: 10}
     assert all(row["diagnosis"]["category"] == "real_regression" for row in rows)
+    assert all(row["wall_time_s"] >= 0 and row["job_correct"] is False for row in rows)
     markdown = (directory / "summary.md").read_text(encoding="utf-8")
     assert "| category accuracy | 10/60 (16.7%) |" in markdown and "## Confusion matrix" in markdown
+    assert markdown.startswith("# Evaluation: constant\n") and "| failing job correct | 0.0% |" in markdown
 
 
 def test_runner_cli(tmp_path, capsys):
@@ -239,6 +258,44 @@ def test_runner_cli(tmp_path, capsys):
     assert "constant: 10/60 correct" in capsys.readouterr().out
     assert (tmp_path / "constant" / "summary.md").is_file()
     assert sum(1 for _ in (tmp_path / "constant" / "cases.jsonl").open(encoding="utf-8")) == 60
+
+
+def test_runner_cli_log_only(tmp_path, capsys):
+    main(["--predictor", "constant", "--mode", "log-only", "--out", str(tmp_path)])
+    assert "constant (log-only): 10/60 correct" in capsys.readouterr().out
+    markdown = (tmp_path / "constant-log-only" / "summary.md").read_text(encoding="utf-8")
+    assert markdown.startswith("# Evaluation: constant (log-only mode)\n")
+    assert not (tmp_path / "constant").exists()
+    with pytest.raises(SystemExit):
+        main(["--predictor", "constant", "--mode", "diff-only", "--out", str(tmp_path)])
+
+
+class Probe:
+    """Tries the diff tools and an old file, and records what came back."""
+
+    name = "probe"
+
+    def __init__(self):
+        self.seen = []
+
+    def predict(self, case_view, toolkit):
+        commit = toolkit.call("get_commit", {"sha": "HEAD"})
+        diff = toolkit.call("compare", {"base": "HEAD", "head": "HEAD"})
+        old = toolkit.call("get_file", {"path": "", "ref": "HEAD~1"})
+        head = toolkit.call("get_file", {"path": ""})
+        self.seen.append((commit.available, diff.available, old.available, head.available,
+                          getattr(commit, "reason", None)))
+        return diagnosis()
+
+
+@pytest.mark.parametrize(("mode", "expected"), [
+    (Mode.FULL, (True, True, False, True, None)),
+    (Mode.LOG_ONLY, (False, False, False, True, LOG_ONLY_REASON)),
+])
+def test_evaluate_builds_each_case_toolkit_for_the_mode(mode, expected):
+    probe = Probe()
+    results = evaluate(probe, LAB, mode=mode)
+    assert len(results) == len(probe.seen) == 60 and set(probe.seen) == {expected}
 
 
 def test_call_log_outputs_stay_out_of_the_jsonl(tmp_path, oracle_results):

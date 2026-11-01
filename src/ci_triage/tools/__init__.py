@@ -4,5 +4,7 @@ from ci_triage.tools.github_tools import TOOLS, Tool, tool_definitions
 from ci_triage.tools.models import NotAvailableResult, ToolCall
 from ci_triage.tools.text import MAX_OUTPUT_CHARS, render
 from ci_triage.tools.toolkit import Toolkit
+from ci_triage.tools.modes import LOG_ONLY_REASON, LogOnlySource, Mode, make_toolkit  # noqa: I001 - after Toolkit
 
-__all__ = ["MAX_OUTPUT_CHARS", "NotAvailableResult", "TOOLS", "Tool", "ToolCall", "Toolkit", "render", "tool_definitions"]
+__all__ = ["LOG_ONLY_REASON", "MAX_OUTPUT_CHARS", "LogOnlySource", "Mode", "NotAvailableResult", "TOOLS", "Tool",
+           "ToolCall", "Toolkit", "make_toolkit", "render", "tool_definitions"]
