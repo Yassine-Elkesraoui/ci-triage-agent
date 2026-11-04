@@ -6,7 +6,8 @@ pinned at v1.0 as the `lab/` submodule: 60 labelled CI failures in 6 categories.
 
 Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools), D4 (diagnosis format and evaluation
 harness), D5a (a rules-only baseline, committed before its first evaluation), D5b (its first score, in
-`reports/`) and D5c (the log-only evaluation mode). No LLM, no agent, no network.
+`reports/`), D5c (the log-only evaluation mode) and D6a (a one-call LLM baseline, pre-registered and not
+yet evaluated). No agent yet. Tests need no network and no keys.
 
 ## Setup
 
@@ -16,6 +17,7 @@ python -m venv .venv
 .venv/Scripts/activate               # Windows; on Linux/macOS: source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
+pip install -e ".[llm]"              # only for the LLM baselines: google-genai, ollama
 ```
 
 ## Layout
@@ -38,6 +40,12 @@ src/ci_triage/
     modes.py            evaluation modes: full, and log-only (no diffs, files only at the eval commit)
   predictors/           predict(CaseView, Toolkit) -> Diagnosis; constant and random baselines
     rules.py            rules-only baseline (no LLM): its decision table is in the module docstring
+    llm_once.py         one-call LLM baseline: a fixed evidence bundle, one model call, one repair at most
+  llm/                  LLM backends and calls (google-genai and ollama imported lazily)
+    config.py           the pre-registered settings (configs/*.toml) and the prompt file
+    clients.py          LLMClient protocol: GeminiClient, OllamaClient, FakeClient (tests)
+    calling.py          ModelCaller: pacing, retries with backoff, the daily call cap, per-call records
+    schema.py           the Diagnosis JSON schema flattened for constrained output
   evaluation/           the only code that reads ground truth
     ground_truth.py     category, target file, mutation, revert commit (evaluation only)
     key_evidence.py     the evidence each case's failure block must contain
@@ -45,9 +53,14 @@ src/ci_triage/
     grader.py           grades one Diagnosis against ground truth and the case's tool call log
     metrics.py          summary metrics and the Markdown report
     run.py              runs a predictor over the 60 cases in a mode, writes results/<name>[-log-only]/
+    llm_run.py          runs an LLM baseline: resumable, paced, capped; api_error cases left out of scoring
+configs/                pre-registered LLM settings (one_call_v1.toml)
+prompts/                LLM prompts (one_call_v1.md)
 reports/                official scores, committed (results/ is gitignored run output)
 tests/
   oracle.py             the oracle predictor: reads ground truth, so it lives here only
+  synthetic.py          a synthetic failing run built in code (not a lab case), for the LLM tests
+  smoke_llm.py          live smoke test by hand: one call per backend on the synthetic run
 ```
 
 Neither `ReplaySource`, the tools nor the predictors import `ci_triage.evaluation`; a test enforces it.
@@ -140,3 +153,36 @@ fix nearly free. It was designed after D5b showed full mode is near ceiling: the
 58/60, with 100% localisation and exact fix match (`reports/d5b-rules-v1.md`). So **log-only is the
 headline comparison for D6**, the LLM agent. That choice is registered here, in D5c, before any LLM
 run. Full-mode results are still reported alongside.
+
+## D6a: the one-call LLM baseline (pre-registered, not yet evaluated)
+
+No tools for the model and no agent loop: `predictors/llm_once.py` gathers one fixed evidence bundle
+through the toolkit, makes one model call for a `Diagnosis` as JSON, and stops. It is the floor the D6
+agent has to beat with the same models.
+
+- **Settings**: one file, `configs/one_call_v1.toml`, printed at the start of every run and verbatim in
+  every summary.md. Hosted: `gemini-3.5-flash-lite` (google-genai, `generate_content` with
+  `response_mime_type="application/json"` and `response_json_schema`, thinking level minimal). Local:
+  `qwen3.5:4b` on Ollama (`format=<schema>`, `think=False`, `num_ctx=8192`, `seed=42`). Both at
+  temperature 0 with at most 1,536 output tokens.
+- **Prompt**: `prompts/one_call_v1.md`. Its category definitions come from general CI knowledge only: no case
+  id, test, package or file name of the lab (a test checks the first three and the lab's target file names).
+- **Bundle**: the run, its jobs and steps (conclusions, durations), `extract_failure_block` for the failing
+  job, the workflow file at the commit under triage, and, only in full mode, `compare(last green run,
+  this run)`. In log-only mode `list_runs`, `get_commit` and `compare` are never called. Each part is capped,
+  and the total is cut (diff first, failure block last) so the prompt fits 8,192 tokens with room for the
+  answer, estimated at a conservative 3 characters per token (the smoke test measured about 3.6).
+- **Validation**: Pydantic. An invalid answer gets one repair call (the model sees its answer and the
+  errors). Still invalid: `invalid_output`, scored as wrong.
+- **Calls**: Gemini attempts are paced to 10 per minute and counted against a daily cap of 450 per
+  Pacific-time day (`results/llm_call_ledger.json`). 429, 503 and 504 (and client-side timeouts) are retried
+  with exponential backoff, five tries at most. A call that still fails is `api_error`: left out of
+  scoring, listed in summary.md, and re-run by `--resume`. Each call records the requested model, the
+  model_version served, tokens in and out, latency and retries. The key is read only from
+  `GEMINI_API_KEY`, and every line written to disk is scrubbed of it.
+
+```bash
+python -m ci_triage.evaluation.llm_run --backend gemini --mode log-only            # or --backend ollama
+python -m ci_triage.evaluation.llm_run --backend gemini --mode log-only --resume   # after a cap or api_error
+python tests/smoke_llm.py gemini ollama        # live smoke test on the synthetic run, not a lab case
+```

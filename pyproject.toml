@@ -12,6 +12,8 @@ dependencies = ["pydantic>=2.7"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The LLM baselines (D6): imported lazily, so the rest of the package and CI need none of it.
+llm = ["google-genai>=2.0", "ollama>=0.5", "tzdata"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

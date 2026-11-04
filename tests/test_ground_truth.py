@@ -44,7 +44,8 @@ def _imports(path: Path) -> set[str]:
 
 def test_replay_and_predictors_never_import_ground_truth():
     replay_side = [*(SRC / "replay").glob("*.py"), *(SRC / "tools").glob("*.py"), *(SRC / "predictors").glob("*.py"),
-                   SRC / "github_source.py", SRC / "_git.py", SRC / "labpaths.py", SRC / "diagnosis.py"]
+                   SRC / "github_source.py", SRC / "_git.py", SRC / "labpaths.py", SRC / "diagnosis.py",
+                   *(SRC / "llm").glob("*.py")]
     for path in replay_side:
         offending = {name for name in _imports(path) if name.startswith("ci_triage.evaluation")}
         assert not offending, f"{path.name} imports {offending}"
