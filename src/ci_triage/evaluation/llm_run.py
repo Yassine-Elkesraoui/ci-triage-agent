@@ -2,7 +2,7 @@
 
 ``python -m ci_triage.evaluation.llm_run --backend gemini|ollama [--mode log-only] [--resume]``
 
-Settings come from one pre-registered config file (default ``configs/one_call_v1.toml``), printed at
+Settings come from one pre-registered config file (default ``configs/one_call_v2.toml``), printed at
 the start of every run and verbatim in every summary.md.
 
 - Each case is appended to ``results/<name>[-<mode>]/cases.jsonl`` as soon as it is done, with its

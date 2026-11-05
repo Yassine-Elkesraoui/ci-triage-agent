@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ci_triage.labpaths import REPO_ROOT
 
-DEFAULT_CONFIG = REPO_ROOT / "configs" / "one_call_v1.toml"
+DEFAULT_CONFIG = REPO_ROOT / "configs" / "one_call_v2.toml"
 REPAIR_MARKER = "<!-- REPAIR MESSAGE"
 
 

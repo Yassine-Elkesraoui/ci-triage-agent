@@ -1,7 +1,7 @@
 """The one-call LLM baseline (D6a): one fixed evidence bundle, one model call, no tools, no agent loop.
 
 The bundle is gathered through the toolkit only, in this order, each part capped (``[budget]`` in
-``configs/one_call_v1.toml``):
+``configs/one_call_v2.toml``):
 
 1. RUN AND JOBS [history]: ``get_run`` and ``get_jobs``: the run, every job and step, conclusions and
    durations.

@@ -54,8 +54,8 @@ src/ci_triage/
     metrics.py          summary metrics and the Markdown report
     run.py              runs a predictor over the 60 cases in a mode, writes results/<name>[-log-only]/
     llm_run.py          runs an LLM baseline: resumable, paced, capped; api_error cases left out of scoring
-configs/                pre-registered LLM settings (one_call_v1.toml)
-prompts/                LLM prompts (one_call_v1.md)
+configs/                pre-registered LLM settings (one_call_v1.toml, one_call_v2.toml)
+prompts/                LLM prompts (one_call_v1.md, one_call_v2.md)
 reports/                official scores, committed (results/ is gitignored run output)
 tests/
   oracle.py             the oracle predictor: reads ground truth, so it lives here only
@@ -160,13 +160,14 @@ No tools for the model and no agent loop: `predictors/llm_once.py` gathers one f
 through the toolkit, makes one model call for a `Diagnosis` as JSON, and stops. It is the floor the D6
 agent has to beat with the same models.
 
-- **Settings**: one file, `configs/one_call_v1.toml`, printed at the start of every run and verbatim in
+- **Settings**: one file, `configs/one_call_v2.toml` (the default), printed at the start of every run and verbatim in
   every summary.md. Hosted: `gemini-3.5-flash-lite` (google-genai, `generate_content` with
   `response_mime_type="application/json"` and `response_json_schema`, thinking level minimal). Local:
   `qwen3.5:4b` on Ollama (`format=<schema>`, `think=False`, `num_ctx=8192`, `seed=42`). Both at
   temperature 0 with at most 1,536 output tokens.
-- **Prompt**: `prompts/one_call_v1.md`. Its category definitions come from general CI knowledge only: no case
-  id, test, package or file name of the lab (a test checks the first three and the lab's target file names).
+- **Prompt**: `prompts/one_call_v2.md`. Its category definitions are the "Definition" column of the public
+  rulebook (`lab/README.md`, from `injections/manifest.json`), copied verbatim; nothing else from the lab: no
+  case id, test, package or file name (a test checks the first three and the lab's target file names).
 - **Bundle**: the run, its jobs and steps (conclusions, durations), `extract_failure_block` for the failing
   job, the workflow file at the commit under triage, and, only in full mode, `compare(last green run,
   this run)`. In log-only mode `list_runs`, `get_commit` and `compare` are never called. Each part is capped,
@@ -180,6 +181,16 @@ agent has to beat with the same models.
   scoring, listed in summary.md, and re-run by `--resume`. Each call records the requested model, the
   model_version served, tokens in and out, latency and retries. The key is read only from
   `GEMINI_API_KEY`, and every line written to disk is scrubbed of it.
+
+**Prompt v1 -> v2 (before any evaluation).** Re-reading v1 against the lab rulebook found two
+conflicts. (1) v1 defined build as failing "before any test runs"; the rulebook defines it as the Docker
+image failing to build while the Python test job is unaffected, so the image build need not come before
+any test. (2) v1 broke ties by symptom order ("the first thing that went wrong"); the rulebook assigns a
+case by the layer that has to change to fix it. v2 (`prompts/one_call_v2.md`, `configs/one_call_v2.toml`)
+copies the rulebook's six definitions verbatim and replaces the tie-break with one sentence: when more than
+one category fits, choose the category of the layer that has to change to fix the failure. The bundle
+description, answer format and repair message are unchanged. v1 was never run; its files are kept
+unchanged for the record.
 
 ```bash
 python -m ci_triage.evaluation.llm_run --backend gemini --mode log-only            # or --backend ollama

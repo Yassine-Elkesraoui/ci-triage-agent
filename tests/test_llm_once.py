@@ -6,6 +6,7 @@ evidence bundle for every case in both modes, to show it fits the token budget; 
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import types
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import synthetic as s
-from conftest import TRUTH
+from conftest import LAB_DIR, TRUTH
 
 from ci_triage.diagnosis import Category, Diagnosis
 from ci_triage.evaluation.grader import grade_case
@@ -23,7 +24,8 @@ from ci_triage.llm.clients import APICallError, FakeClient, GeminiClient, Missin
 from ci_triage.llm.config import load_config
 from ci_triage.llm.schema import response_schema
 from ci_triage.predictors.base import CaseView
-from ci_triage.predictors.llm_once import LLMOncePredictor, gather_bundle, parse_diagnosis, truncate
+from ci_triage.predictors.llm_once import (_SHRINK_ORDER, MIN_SECTION_CHARS, LLMOncePredictor, gather_bundle,
+                                           parse_diagnosis, truncate)
 from ci_triage.replay import ReplaySource
 from ci_triage.tools import Mode, make_toolkit
 
@@ -70,8 +72,16 @@ def test_preregistered_settings():
 
 
 def test_prompt_uses_nothing_from_the_lab():
-    """No case id, target file, failing test or package name of the lab appears in the prompt."""
+    """No case id, target file, failing test or package name of the lab appears in the prompt.
+
+    One exception: "pytest" may appear inside a category definition copied verbatim from the lab's public
+    rulebook (the manifest's definitions, the "Definition" column of lab/README.md), and nowhere else.
+    """
     text = (LOADED.path.parents[1] / CONFIG.prompt).read_text(encoding="utf-8")
+    rulebook = json.loads((LAB_DIR / "injections" / "manifest.json").read_text(encoding="utf-8"))["categories"]
+    for definition in rulebook.values():
+        if "pytest" in definition.lower():
+            text = text.replace(definition, re.sub("(?i)pytest", "<rulebook>", definition))
     assert not re.search(r"\binj-\d+", text)
     for truth in TRUTH.values():
         assert Path(truth.target_file).name not in text, truth.target_file
@@ -272,12 +282,22 @@ def test_bundle_under_the_token_cap(mode):
     assert "[truncated:" in bundle.section("WORKFLOW FILE").text
 
 
-def test_total_is_cut_to_fit_a_smaller_context():
-    tight = BUDGET.model_copy(update={"context_tokens": 5000})
-    toolkit, _ = s.toolkit(Mode.FULL, big=True)
-    bundle = gather_bundle(CaseView(s.RUN_ID), toolkit, tight, len(LOADED.prompt.system), MAX_OUT)
-    assert len(LOADED.prompt.system) + len(bundle.user_message()) <= tight.prompt_chars(MAX_OUT)
-    assert len(bundle.section("FAILURE BLOCK").text) > len(bundle.section("DIFF").text)  # the diff goes first
+@pytest.mark.parametrize("context_tokens", [5000, 4000])  # 5000 cuts the diff only, 4000 the workflow file too
+def test_total_is_cut_to_fit_a_smaller_context(context_tokens):
+    """Fitting cuts sections in _SHRINK_ORDER: the diff first, and a section only once every section before
+    it is down to MIN_SECTION_CHARS. Compared with the same bundle gathered with no room limit."""
+    system = len(LOADED.prompt.system)
+    roomy = BUDGET.model_copy(update={"context_tokens": 10**6})
+    tight = BUDGET.model_copy(update={"context_tokens": context_tokens})
+    before = gather_bundle(CaseView(s.RUN_ID), s.toolkit(Mode.FULL, big=True)[0], roomy, system, MAX_OUT)
+    after = gather_bundle(CaseView(s.RUN_ID), s.toolkit(Mode.FULL, big=True)[0], tight, system, MAX_OUT)
+    assert system + len(after.user_message()) <= tight.prompt_chars(MAX_OUT)
+    cut = [len(after.section(t).text) < len(before.section(t).text) for t in _SHRINK_ORDER]
+    assert cut[0]  # the diff goes first
+    assert cut == sorted(cut, reverse=True)  # the cut sections are a prefix of the order
+    for title, later_cut in zip(_SHRINK_ORDER, [any(cut[i + 1:]) for i in range(len(cut))]):
+        if later_cut:
+            assert len(after.section(title).text) <= MIN_SECTION_CHARS, title
 
 
 def test_truncate_keeps_whole_lines_within_the_limit():

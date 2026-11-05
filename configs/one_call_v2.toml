@@ -1,0 +1,43 @@
+# D6a: the one-call LLM baseline. Pre-registered settings, committed before any evaluation run.
+# Every report of this baseline prints this file verbatim. Changing a value makes a new version
+# (one_call_v2.toml, ...); never edit this file after its first evaluation.
+
+name = "one_call_v2"
+prompt = "prompts/one_call_v2.md"
+
+[generation]                # both backends
+temperature = 0.0
+max_output_tokens = 1536    # a full Diagnosis (5 quotes, root cause, fix) is well under this
+repair_calls = 1            # one follow-up call if the first answer is not a valid Diagnosis
+
+[budget]                    # the prompt must fit the local model's context with room for the answer
+context_tokens = 8192
+reserve_tokens = 256        # chat template and slack, on top of max_output_tokens
+chars_per_token = 3.0       # conservative estimate (logs and code run at ~3.5-4 chars per token)
+jobs_chars = 2500           # run, jobs and steps summary
+failure_block_chars = 4000  # extract_failure_block for the failing job (the tool's own cap)
+workflow_chars = 3500       # the workflow file at the commit under triage
+diff_chars = 4000           # compare(last green run, run under triage); full mode only
+
+[gemini]
+model = "gemini-3.5-flash-lite"
+thinking_level = "minimal"  # closest to the local model's think=false
+seed = 42
+max_requests_per_minute = 10
+daily_call_cap = 450        # attempts per Pacific-time day, retries and repairs included
+timeout_s = 120
+
+[ollama]
+model = "qwen3.5:4b"
+think = false
+num_ctx = 8192
+seed = 42
+host = "http://localhost:11434"
+timeout_s = 600
+
+[retry]
+max_tries = 5               # attempts per model call, the first one included
+statuses = [429, 503, 504]  # a client-side timeout counts as 504
+backoff_initial_s = 5.0
+backoff_factor = 2.0
+backoff_max_s = 60.0
