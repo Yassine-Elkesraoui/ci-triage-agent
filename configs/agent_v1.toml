@@ -1,0 +1,66 @@
+# D6b: the tool-using agent. Pre-registered settings, committed before any evaluation run.
+# Every report of this agent prints this file verbatim. Changing a value makes a new version
+# (agent_v2.toml, ...); never edit this file after its first evaluation.
+
+name = "agent_v1"
+prompt = "prompts/agent_v1.md"     # prompts/one_call_v2.md, one sentence dropped, plus a Tools section
+bundle = "configs/one_call_v2.toml"  # the first user turn is exactly this config's bundle for the mode
+
+[agent]
+max_turns = 8               # model turns per case, the answer turn included; the repair call is extra
+# Turns 1 to max_turns - 1 offer the mode's tools and leave the answer unconstrained; a turn that calls
+# no tool is the answer. Turn max_turns offers no tools and constrains the answer to the Diagnosis
+# schema. So does any earlier turn when the conversation plus one more answer would not fit the context
+# budget (recorded as context_forced); tool results that still do not fit are dropped, never shown,
+# and so never count as seen for grounding.
+
+[generation]                # both backends
+temperature = 0.0
+max_output_tokens = 1536
+repair_calls = 1            # one follow-up call if the answer is not a valid Diagnosis; still invalid: invalid_output
+
+[context]                   # both backends, so the two see the same conversations
+context_tokens = 16384      # system prompt, tool definitions, every turn so far and the answer must fit
+reserve_tokens = 256        # chat template and slack, on top of max_output_tokens
+chars_per_token = 3.0       # the estimate the check uses (Ollama's own counts skip its cached prompt)
+
+[gemini]
+model = "gemini-3.5-flash-lite"
+thinking_level = "minimal"
+seed = 42
+max_requests_per_minute = 10
+daily_call_cap = 450        # attempts per Pacific-time day, retries and repairs included, shared with D6a
+timeout_s = 120
+
+[ollama]
+model = "qwen3.5:4b"
+think = false
+num_ctx = 16384             # = context_tokens
+seed = 42
+host = "http://localhost:11434"
+timeout_s = 600
+
+[retry]
+max_tries = 5               # attempts per model call, the first one included
+statuses = [429, 500, 503, 504]  # a client-side timeout counts as 504
+backoff_initial_s = 5.0
+backoff_factor = 2.0
+backoff_max_s = 60.0
+
+# The registered run plan, in order. Log-only runs first for each backend: it is the headline condition.
+# The runner refuses a run until every earlier run of the same backend has all 60 cases scored.
+[[run]]
+backend = "gemini"
+mode = "log-only"
+
+[[run]]
+backend = "gemini"
+mode = "full"
+
+[[run]]
+backend = "ollama"
+mode = "log-only"
+
+[[run]]
+backend = "ollama"
+mode = "full"

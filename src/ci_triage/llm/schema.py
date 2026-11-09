@@ -33,6 +33,12 @@ def _inline(node: Any, defs: dict[str, Any]) -> Any:
     return out
 
 
+def parameters_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """A tool input's JSON schema in the same plain form, for native tool calling; optional fields stay
+    optional."""
+    return _inline(schema, schema.get("$defs", {}))
+
+
 def response_schema(model: type[BaseModel]) -> dict[str, Any]:
     """``model``'s schema, flattened, with every top-level field required (nullable ones may be null), so
     constrained decoding always writes every field."""

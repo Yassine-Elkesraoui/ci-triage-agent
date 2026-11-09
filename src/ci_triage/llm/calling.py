@@ -1,8 +1,8 @@
 """Model calls with pacing, retries, a daily attempt cap, and a record of each call.
 
-``ModelCaller.call`` makes one logical model call: up to ``RetrySettings.max_tries`` attempts, retrying
-only the statuses listed there (429, 503, 504) with exponential backoff. Before each attempt it takes
-a slot from the ``CallLedger`` (raising ``DailyCapReached`` when the day's cap is used up) and waits for
+``ModelCaller.call`` (one-call) and ``ModelCaller.chat`` (agent) make one logical model call: up to
+``RetrySettings.max_tries`` attempts, retrying only the statuses listed there with exponential backoff.
+Before each attempt it takes a slot from the ``CallLedger`` (raising ``DailyCapReached`` when the day's cap is used up) and waits for
 the ``Pacer``. It returns the response and an ``LLMCallRecord``, or raises ``APIFailure`` carrying the
 record of the failed attempts. Any known secret is scrubbed from every string it records.
 """
@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from ci_triage.llm.clients import API_KEY_ENV, APICallError, LLMClient, LLMResponse, Message
+from ci_triage.llm.clients import API_KEY_ENV, APICallError, LLMClient, LLMResponse, Message, ToolSpec
 from ci_triage.llm.config import RetrySettings
 
 MAX_RECORDED_OUTPUT = 20_000  # characters of raw model output kept per call
@@ -29,8 +29,8 @@ REDACTED = "<redacted>"
 class LLMCallRecord(BaseModel):
     """One logical model call (its retries included), as written to cases.jsonl."""
 
-    purpose: Literal["diagnose", "repair"]
-    backend: str
+    purpose: Literal["diagnose", "repair", "turn", "answer"]  # one-call: diagnose; agent: turn (tools offered),
+    backend: str  # answer (the forced last turn); both: repair
     requested_model: str
     model_version: str | None = None
     tokens_in: int | None = None
@@ -44,6 +44,8 @@ class LLMCallRecord(BaseModel):
     finish_reason: str | None = None
     output: str | None = None  # the raw answer, clipped to MAX_RECORDED_OUTPUT
     context_overflow: bool = False  # tokens_in + max_output_tokens exceeded the context window
+    tools_offered: int = 0  # agent: tools offered on this call
+    tool_calls: list[str] = Field(default_factory=list)  # agent: names of the tools the answer called
 
 
 class APIFailure(Exception):
@@ -154,8 +156,23 @@ class ModelCaller:
 
     def call(self, purpose: Literal["diagnose", "repair"], system: str, messages: Sequence[Message],
              schema: dict[str, Any]) -> tuple[LLMResponse, LLMCallRecord]:
+        """One-call request (``LLMClient.generate``)."""
+        return self._call(purpose, lambda: self.client.generate(
+            system, messages, schema, temperature=self.temperature, max_output_tokens=self.max_output_tokens))
+
+    def chat(self, purpose: Literal["turn", "answer", "repair"], system: str, messages: Sequence[Message], *,
+             tools: Sequence[ToolSpec] | None, schema: dict[str, Any] | None) -> tuple[LLMResponse, LLMCallRecord]:
+        """Agent request (``LLMClient.chat``), paced, capped and retried exactly like ``call``."""
+        response, record = self._call(purpose, lambda: self.client.chat(
+            system, messages, tools=tools, schema=schema, temperature=self.temperature,
+            max_output_tokens=self.max_output_tokens), tools_offered=len(tools or ()))
+        record.tool_calls = [scrub(str(c.name), self.secrets)[:100] for c in response.tool_calls]
+        return response, record
+
+    def _call(self, purpose: str, request: Callable[[], LLMResponse],
+              tools_offered: int = 0) -> tuple[LLMResponse, LLMCallRecord]:
         record = LLMCallRecord(purpose=purpose, backend=self.client.backend,
-                               requested_model=self.client.requested_model)
+                               requested_model=self.client.requested_model, tools_offered=tools_offered)
         start = time.perf_counter()
         while True:
             if self.ledger is not None:
@@ -164,8 +181,7 @@ class ModelCaller:
                 self.pacer.wait()
             record.attempts += 1
             try:
-                response = self.client.generate(system, messages, schema, temperature=self.temperature,
-                                                max_output_tokens=self.max_output_tokens)
+                response = request()
             except APICallError as exc:
                 record.attempt_errors.append(scrub(str(exc), self.secrets)[:500])
                 retryable = exc.status in self.retry.statuses and record.attempts < self.retry.max_tries

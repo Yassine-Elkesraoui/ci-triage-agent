@@ -14,6 +14,7 @@ from ci_triage.labpaths import REPO_ROOT
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "one_call_v2.toml"
 REPAIR_MARKER = "<!-- REPAIR MESSAGE"
+FINAL_MARKER = "<!-- FINAL TURN MESSAGE"  # agent prompts only: the forced last turn
 
 
 class _Strict(BaseModel):
@@ -92,6 +93,7 @@ class Prompt:
     system: str
     repair: str  # contains "{errors}"
     sha256: str
+    final_turn: str | None = None  # agent prompts: the user turn that asks for the answer now
 
     def repair_message(self, errors: str) -> str:
         return self.repair.replace("{errors}", errors)
@@ -115,10 +117,12 @@ def load_prompt(path: Path) -> Prompt:
     system, marker, rest = text.partition(REPAIR_MARKER)
     if not marker:
         raise ValueError(f"{path}: no '{REPAIR_MARKER}' section")
-    repair = rest.split("-->", 1)[1].strip()
+    repair, final_marker, final_rest = rest.split("-->", 1)[1].partition(FINAL_MARKER)
+    repair = repair.strip()
     if "{errors}" not in repair:
         raise ValueError(f"{path}: the repair message has no {{errors}} placeholder")
-    return Prompt(system=system.strip(), repair=repair, sha256=_sha(text))
+    final = final_rest.split("-->", 1)[1].strip() if final_marker else None
+    return Prompt(system=system.strip(), repair=repair, sha256=_sha(text), final_turn=final)
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG) -> LoadedConfig:
