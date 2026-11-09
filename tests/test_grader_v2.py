@@ -247,7 +247,7 @@ def test_results_names_parse_back(name, mode):
     assert parse_results_name(results_name(name, mode)) == (name, mode)
 
 
-# -- every saved run: v1 reproduces it, v2 changes only grounding, quote rules and remove-type fixes ---------
+# -- every saved run: its grader reproduces it, v2 changes only grounding, quote rules and remove-type fixes ---
 
 SAVED = saved_runs()
 
@@ -262,15 +262,16 @@ def regraded(request):
         pytest.skip(str(exc))
 
 
-def test_saved_run_v1_reproduces_the_saved_grades(regraded):
-    assert regraded.v1 and regraded.v1_reproduces
+def test_saved_run_its_grader_reproduces_the_saved_grades(regraded):
+    assert regraded.stored and regraded.reproduces
 
 
-def test_saved_run_v1_reproduces_the_saved_summary_byte_for_byte(regraded):
+def test_saved_run_its_grader_reproduces_the_saved_summary_byte_for_byte(regraded):
     if regraded.name.startswith("one_call"):
         pytest.skip("an LLM run's summary.md also holds the model-call figures")
     saved = (regraded.directory / "summary.md").read_text(encoding="utf-8")
-    assert to_markdown(regraded.summaries()[0]) == saved
+    summary = regraded.summaries()[0 if regraded.saved_grader == "v1" else 1]
+    assert to_markdown(summary) == saved
 
 
 def test_saved_run_category_job_step_file_identical_under_v1_and_v2(regraded):

@@ -5,7 +5,8 @@ with none, every directory under results/ that holds a cases.jsonl. For each sav
 calls are replayed offline on a fresh toolkit for the run's mode (the replay source is deterministic, so
 the outputs are the ones the predictor got; a replayed call whose size or availability differs is an
 error), and the saved diagnosis is graded again with grader v1 and grader v2. One-call LLM cases are graded
-against the sections of their saved bundle. Grader v1 must reproduce the saved grades exactly.
+against the sections of their saved bundle. The grader a run was saved with (v1 for every run before
+grader v2) must reproduce its saved grades exactly.
 
 Writes ``DIR/grader-v2/cases.jsonl`` and ``summary.md``; the saved files are never touched. Only scored
 cases are re-graded (for LLM runs: ``ok`` and ``invalid_output``). A run saved by an older grader, whose
@@ -45,13 +46,26 @@ class Regraded:
     directory: Path
     name: str  # the predictor's
     mode: Mode
-    stored: list[CaseResult]  # as saved (graded v1)
+    stored: list[CaseResult]  # as saved
     v1: list[CaseResult]
     v2: list[CaseResult]
 
     @property
-    def v1_reproduces(self) -> bool:
-        return [r.model_dump() for r in self.stored] == [r.model_dump() for r in self.v1]
+    def saved_grader(self) -> str:
+        """The grader the run was saved with (one per run)."""
+        graders = {r.grader for r in self.stored}
+        if len(graders) != 1:
+            raise ValueError(f"{self.directory.name}: saved cases graded with {sorted(graders) or 'nothing'}")
+        return graders.pop()
+
+    @property
+    def regraded_as_saved(self) -> list[CaseResult]:
+        return self.v1 if self.saved_grader == "v1" else self.v2
+
+    @property
+    def reproduces(self) -> bool:
+        """The saved grader, run again, gives the saved grades exactly."""
+        return [r.model_dump() for r in self.stored] == [r.model_dump() for r in self.regraded_as_saved]
 
     def summaries(self) -> tuple[Summary, Summary]:
         return summarise(self.name, self.v1, self.mode.value), summarise(self.name, self.v2, self.mode.value)
@@ -130,7 +144,7 @@ def _row(run: Regraded) -> str:
             f"{round(s2.grounding_rate * s2.cases)}/{s2.cases}, quotes {q1} -> {q2}/{s2.quotes}, "
             f"quote rules followed {s2.quote_rules_followed}/{s2.quotes}, fix exact {exact1}/{s1.fix_cases} -> "
             f"{exact2}/{s2.fix_cases} restore-type ({s2.needs_judge} need a judge); "
-            f"v1 reproduces the saved grades: {'yes' if run.v1_reproduces else 'NO'}")
+            f"saved grader {run.saved_grader} reproduces the saved grades: {'yes' if run.reproduces else 'NO'}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -148,10 +162,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             continue
         write_v2(run)
         print(_row(run))
-        if not run.v1_reproduces:
+        if not run.reproduces:
             failed.append(directory.name)
     if failed:
-        raise SystemExit(f"grader v1 does not reproduce the saved grades of: {', '.join(failed)}")
+        raise SystemExit(f"the saved grader does not reproduce the saved grades of: {', '.join(failed)}")
 
 
 if __name__ == "__main__":
