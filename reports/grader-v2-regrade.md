@@ -232,6 +232,72 @@ These are evidence for reading the v2 numbers; nothing here was applied.
 and the regression tests skip them with that reason. They are sanity runs outside D5 and D6a. Re-running them
 (`python -m ci_triage.evaluation.run --predictor constant`, and so on) would grade them with v2.
 
+**Update, 2026-11-09:** they have since been re-run with grader v2, in both modes; see the next section.
+
+## Sanity check under grader v2
+
+The three sanity predictors were re-run on 2026-11-09 with grader v2, in both modes, from `3f4b83a`. None of
+them uses an LLM.
+- **oracle** answers from ground truth and quotes the failure block it fetched. It is test-only, so it ran
+  with `PYTHONPATH=tests`.
+- **constant** always answers real_regression.
+- **random** picks a uniformly random category, seed 0.
+
+The runs overwrote the stale 2026-10-31 results. Their predicted categories are identical to those, case by
+case.
+
+```powershell
+$env:PYTHONPATH = "tests"
+.\.venv\Scripts\python.exe -m ci_triage.evaluation.run --predictor oracle:OraclePredictor --mode full --grader v2   # and --mode log-only
+.\.venv\Scripts\python.exe -m ci_triage.evaluation.run --predictor constant --mode full --grader v2                # and --mode log-only
+.\.venv\Scripts\python.exe -m ci_triage.evaluation.run --predictor random --mode full --grader v2                  # and --mode log-only
+```
+
+| run | category | macro-F1 | job / step / file | grounded cases | grounded quotes | quote rules followed | fix exact, restore-type | remove-type | Brier |
+|---|---|---|---|---|---|---|---|---|---|
+| oracle, full | **60/60** | **1.000** | 60 / 60 / 60 | **60/60** | 96/96 | **96/96** (60/60 cases) | **38/38** | 22 needs_judge (0 no fix) | 0.0000 |
+| oracle, log-only | **60/60** | **1.000** | 60 / 60 / 60 | **60/60** | 96/96 | **96/96** (60/60 cases) | **38/38** | 22 needs_judge (0 no fix) | 0.0000 |
+| constant, full | 10/60 | 0.048 | 0 / 0 / 0 | 0/60 | no quotes | no quotes | 0/38 | 22 needs_judge (22 no fix) | 0.1389 |
+| constant, log-only | 10/60 | 0.048 | 0 / 0 / 0 | 0/60 | no quotes | no quotes | 0/38 | 22 needs_judge (22 no fix) | 0.1389 |
+| random, full | 9/60 | 0.147 | 0 / 0 / 0 | 0/60 | no quotes | no quotes | 0/38 | 22 needs_judge (22 no fix) | 0.1278 |
+| random, log-only | 9/60 | 0.147 | 0 / 0 / 0 | 0/60 | no quotes | no quotes | 0/38 | 22 needs_judge (22 no fix) | 0.1278 |
+
+- **oracle** is perfect on every v2 metric in both modes. Every case was checked, not only the summary: category,
+  job, step, file, action, grounding, all five quote rules (0 breaks), exact fix on every restore-type case,
+  needs_judge on every remove-type one, Brier 0.
+- **constant** is exactly 10/60 (the 10 real regressions). Its macro-F1 is (2/7)/6 = 0.048, the value the
+  tests expect.
+- **random** is 9/60, near the expected 10 (binomial(60, 1/6): mean 10, sd 2.9). Its seed depends only on the
+  run id, so it makes the same 9 hits in both modes: inj-003, 007, 008, 026, 027, 028, 033, 044 and 050.
+- **No grounding for constant or random.** They make no tool calls and quote nothing, so they have no grounded
+  cases and no quote-rule figures.
+- **Reproduction.** `python -m ci_triage.evaluation.regrade` re-grades all six runs. Since they were saved with
+  grader v2, grader v2 is the one that must reproduce them, and it does exactly. That includes each
+  `summary.md`, byte for byte.
+
+**Why this needed a fix.** These are the first saved runs graded with v2. The re-grade check and the saved-run
+regression tests in `c4adf0e` assumed every saved run had been graded with v1, so all six "failed" the
+reproduction check: 12 test failures. Commit `3f4b83a` reproduces each saved run with the grader its records
+name. No grading rule changed.
+
+**Skipped tests.** The full suite went from 24 skips before grader v2 to 47 at `c4adf0e`. The 23 extra skips
+were all in `tests/test_grader_v2.py`:
+
+| skips | test | reason |
+|---|---|---|
+| 15 | the 5 saved-run tests × 3 stale runs (constant, oracle, random) | saved by an older grader (missing `job_correct`) |
+| 4 | the byte-for-byte `summary.md` check × 4 one-call runs | an LLM run's summary also holds the model-call figures |
+| 4 | the rules-only grounding check × 4 one-call runs | not a rules run |
+
+So 15 of the 23 were the old sanity runs; the other 8 are skips by design. With the sanity runs re-run, the
+suite at `3f4b83a` has **3,127 passed, 38 skipped, 0 failed**:
+- 24 skips from before grader v2 (`test_log_only.py`: no removed line of 8+ characters is absent from the
+  eval-commit file).
+- 10 for the rules-only check on the 4 one-call runs and the 6 sanity runs.
+- 4 for the byte-for-byte check on the 4 one-call runs.
+
+The stale-run skips are gone. Those 15 tests now run on the 6 sanity runs: 24 pass, and 6 are rules-only skips.
+
 ## Reproduce
 
 From the repo root, in `.venv`, with the saved runs under `results/`:
