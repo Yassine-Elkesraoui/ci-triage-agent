@@ -12,12 +12,27 @@
   what the injection added (a timeout-minutes line, an env block, a pytest.ini option, a sleep);
   for those the removed text is what the fix must name;
 - action: the one ``ACTION_FOR`` the true category.
+
+That is grader v1. Grader v2 (the default; ``grader="v1"`` reproduces the v1 scores) changes three things,
+after the read-only audit of the D6a runs (``reports/grader-v2-regrade.md``):
+
+- grounding: quote and source text both go through ``ground_normalise`` (per line: a "<n>| " line-number
+  prefix, the indentation and one diff gutter marker, "+" or "-", stripped; then whitespace collapsed as
+  fix match does). A consequence: v2 cannot tell an added diff line from a removed one. A quote is grounded if that text is in the section it cites, or in any section (the label is
+  then wrong). Sections are what the predictor showed the model: the one-call bundle's sections, or for
+  tool-calling predictors the outputs of each source's tools (``SOURCE_TOOLS``);
+- quote rules followed, a separate metric that does not affect grounding: per quote, a wrong source
+  label, a quoted header line the predictor formatted, a history quote that is more than a job or step
+  name, a kept line-number prefix, an ellipsis the source text does not have (``QuoteRules``);
+- fix match: unchanged for restore-type cases; remove-type cases get "needs_judge" (whether a fix
+  removes the right thing is left to a judge) and are left out of the fix-match rates.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections import Counter
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -26,7 +41,11 @@ from ci_triage.diagnosis import ACTION_FOR, Category, Diagnosis, Evidence, Evide
 from ci_triage.evaluation.ground_truth import GroundTruth
 from ci_triage.tools import ToolCall
 
-FixMatch = Literal["exact", "partial", "none"]
+FixMatch = Literal["exact", "partial", "none", "needs_judge"]  # needs_judge: grader v2, remove-type cases
+GraderVersion = Literal["v1", "v2"]
+GRADERS: tuple[GraderVersion, ...] = ("v1", "v2")
+DEFAULT_GRADER: GraderVersion = "v2"
+Sections = Mapping[EvidenceSource | str, Sequence[str]]  # evidence source -> the texts shown under it
 
 SOURCE_TOOLS: dict[EvidenceSource, frozenset[str]] = {
     EvidenceSource.LOG: frozenset({"get_job_log", "extract_failure_block"}),
@@ -38,6 +57,31 @@ MIN_PARTIAL_LINE = 8  # shorter restored lines ("env:", "]") say too little on t
 
 _LINE_NUMBER = re.compile(r"^\d+\| ", re.MULTILINE)
 _TOKEN = re.compile(r"[A-Za-z0-9_]+(?:[.\-][A-Za-z0-9_]+)*")  # keeps 2.13.4 and timeout-minutes whole
+
+# -- grader v2 patterns
+_ANY_LINE_NUMBER = re.compile(r"^\s*\d+\|(?= |$) ?")  # "12| " as pages number lines, any number, one space
+_MARKER = ("+", "-")  # a diff line's gutter, once the leading space (the context gutter) is gone
+_ELLIPSIS = ("...", "…")
+# Lines the one-call predictor formats itself (``ci_triage.predictors.llm_once``), never tool output:
+_HEADER_LINE = re.compile("|".join((
+    r"=== (?:RUN AND JOBS|FAILURE BLOCK|WORKFLOW FILE|DIFF) \[\w+\].*===",  # a section header
+    r"\[?[a-z_]+(?:, [a-z_]+)*; (?:step |lines \d).*",  # a failure-block header "[kinds; step S; lines a-b]"
+    r"--- \S.* \([a-z]+, \+\d+ -\d+\)",  # a diff file header "--- path (modified, +1 -0)"
+    r"From [0-9a-f]{7,40} \(last successful run\) to [0-9a-f]{7,40} \(this run\)",
+    r"\[truncated: \d+ more characters not shown\]",
+)))
+QUOTE_RULES = ("wrong_source", "section_header", "history_not_name", "line_number_prefix", "ellipsis")
+
+
+class QuoteRules(BaseModel):
+    """Grader v2: how many of a case's quotes break each quoting rule (one quote can break several)."""
+
+    followed: int  # quotes that break none
+    wrong_source: int = 0  # not in the section it cites, but in another one
+    section_header: int = 0  # quotes a header line the predictor formatted
+    history_not_name: int = 0  # a history quote that is not just a job or step name
+    line_number_prefix: int = 0  # keeps a "12| " line-number prefix
+    ellipsis: int = 0  # has "..." or "…" and is not in the source text as written
 
 
 class CaseResult(BaseModel):
@@ -60,6 +104,8 @@ class CaseResult(BaseModel):
     error: str | None = None
     diagnosis: Diagnosis | None
     calls: list[ToolCall]
+    grader: GraderVersion = "v1"  # results saved before grader v2 were graded with v1
+    quote_rules: QuoteRules | None = None  # grader v2 only
 
 
 # -- evidence -------------------------------------------------------------------
@@ -127,6 +173,81 @@ def fix_match(suggested_fix: str | None, truth: GroundTruth) -> FixMatch:
     return "none"
 
 
+# -- grader v2 --------------------------------------------------------------------
+
+
+def ground_normalise(text: str) -> str:
+    """The text v2 grounding compares: per line, a line-number prefix off, the leading whitespace off
+    (indentation, and a context line's " " gutter), then one "+" or "-" diff marker off; then whitespace
+    collapsed exactly as fix match does (``normalise``). Leading whitespace goes before the marker, so a
+    re-indented " +  where" and "+ where" agree."""
+    lines = []
+    for line in text.split("\n"):
+        line = _ANY_LINE_NUMBER.sub("", line, count=1).lstrip()
+        lines.append(line[1:] if line[:1] in _MARKER else line)
+    return normalise("\n".join(lines))
+
+
+def tool_sections(calls: Sequence[ToolCall]) -> dict[EvidenceSource, list[str]]:
+    """Sections for a predictor that reads tool outputs itself: each source's tools' returned strings."""
+    return {source: [text for call in calls if call.tool in tools and call.available for text in _strings(call.output)]
+            for source, tools in SOURCE_TOOLS.items()}
+
+
+def job_and_step_names(calls: Sequence[ToolCall]) -> set[str]:
+    """Every job and step name a ``get_jobs`` call returned, normalised and case-folded."""
+    names = set()
+    for call in calls:
+        if call.tool == "get_jobs" and call.available:
+            for job in call.output.get("jobs", []):
+                names.add(job.get("name"))
+                names.update(step.get("name") for step in job.get("steps", []))
+    return {normalise(name).casefold() for name in names if name}
+
+
+def is_header_line(line: str) -> bool:
+    """A line the one-call predictor formats itself (section, failure-block, diff-file header), not tool text."""
+    return bool(_HEADER_LINE.fullmatch(_ANY_LINE_NUMBER.sub("", line, count=1).strip()))
+
+
+def check_quote(evidence: Evidence, sections: Mapping[EvidenceSource, Sequence[str]],
+                names: set[str]) -> tuple[bool, frozenset[str]]:
+    """(grounded, the quote rules it breaks). ``sections`` must already be ``ground_normalise``d."""
+    quote = ground_normalise(evidence.quote)
+    in_cited = bool(quote) and any(quote in text for text in sections.get(evidence.source, ()))
+    grounded = in_cited or (bool(quote) and any(
+        quote in text for source, texts in sections.items() if source != evidence.source for text in texts))
+    lines = [line for line in evidence.quote.split("\n") if line.strip()]
+    breaks = set()
+    if grounded and not in_cited:
+        breaks.add("wrong_source")
+    if any(map(is_header_line, lines)):
+        breaks.add("section_header")
+    if evidence.source == EvidenceSource.HISTORY and normalise(evidence.quote).casefold() not in names:
+        breaks.add("history_not_name")
+    if any(_ANY_LINE_NUMBER.match(line) for line in lines):
+        breaks.add("line_number_prefix")
+    if not grounded and any(mark in evidence.quote for mark in _ELLIPSIS):
+        breaks.add("ellipsis")
+    return grounded, frozenset(breaks)
+
+
+def fix_match_v2(suggested_fix: str | None, truth: GroundTruth) -> FixMatch:
+    """v1 fix match for restore-type cases; "needs_judge" for remove-type ones."""
+    return "needs_judge" if fix_target(truth)[0] == "remove" else fix_match(suggested_fix, truth)
+
+
+def _quotes_v2(evidence: Sequence[Evidence], calls: Sequence[ToolCall],
+               sections: Sections | None) -> tuple[int, QuoteRules]:
+    shown = tool_sections(calls) if sections is None else sections
+    normalised = {EvidenceSource(source): [ground_normalise(text) for text in texts] for source, texts in shown.items()}
+    names = job_and_step_names(calls)
+    checks = [check_quote(e, normalised, names) for e in evidence]
+    broken = Counter(rule for _, breaks in checks for rule in breaks)
+    return (sum(grounded for grounded, _ in checks),
+            QuoteRules(followed=sum(not breaks for _, breaks in checks), **{rule: broken[rule] for rule in QUOTE_RULES}))
+
+
 # -- the case -------------------------------------------------------------------
 
 
@@ -139,7 +260,12 @@ def _same_name(a: str, b: str) -> bool:
 
 
 def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[ToolCall],
-               error: str | None = None, wall_time_s: float = 0.0) -> CaseResult:
+               error: str | None = None, wall_time_s: float = 0.0, *, grader: GraderVersion = DEFAULT_GRADER,
+               sections: Sections | None = None) -> CaseResult:
+    """Grade one case. ``sections``: what the predictor showed the model, by evidence source (grader v2;
+    the one-call bundle's sections). Left out, v2 uses the outputs of the calls (``tool_sections``)."""
+    if grader not in GRADERS:
+        raise ValueError(f"unknown grader {grader!r}; graders are {', '.join(GRADERS)}")
     true_category = Category(truth.category)
     kind = fix_target(truth)[0]
     if diagnosis is None:
@@ -147,8 +273,14 @@ def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[
                           category_correct=False, step_correct=False, job_correct=False, file_correct=False,
                           quotes=0, quotes_grounded=0, evidence_grounded=False, fix_kind=kind, fix_match="none",
                           action_correct=False, tool_calls=len(calls), wall_time_s=wall_time_s, error=error,
-                          diagnosis=None, calls=list(calls))
-    grounded = sum(is_grounded(evidence, calls) for evidence in diagnosis.evidence)
+                          diagnosis=None, calls=list(calls), grader=grader,
+                          quote_rules=QuoteRules(followed=0) if grader == "v2" else None)
+    if grader == "v1":
+        grounded = sum(is_grounded(evidence, calls) for evidence in diagnosis.evidence)
+        rules, fix = None, fix_match(diagnosis.suggested_fix, truth)
+    else:
+        grounded, rules = _quotes_v2(diagnosis.evidence, calls, sections)
+        fix = fix_match_v2(diagnosis.suggested_fix, truth)
     return CaseResult(
         case_id=truth.case_id,
         true_category=true_category,
@@ -162,11 +294,13 @@ def grade_case(truth: GroundTruth, diagnosis: Diagnosis | None, calls: Sequence[
         quotes_grounded=grounded,
         evidence_grounded=bool(diagnosis.evidence) and grounded == len(diagnosis.evidence),
         fix_kind=kind,
-        fix_match=fix_match(diagnosis.suggested_fix, truth),
+        fix_match=fix,
         action_correct=diagnosis.recommended_action == ACTION_FOR[true_category],
         tool_calls=len(calls),
         wall_time_s=wall_time_s,
         error=error,
         diagnosis=diagnosis,
         calls=list(calls),
+        grader=grader,
+        quote_rules=rules,
     )

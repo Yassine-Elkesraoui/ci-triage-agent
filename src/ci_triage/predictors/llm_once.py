@@ -84,6 +84,21 @@ class Bundle:
         return next((s for s in self.sections if s.title == title), None)
 
 
+_SECTION_LINE = re.compile(r"^=== (RUN AND JOBS|FAILURE BLOCK|WORKFLOW FILE|DIFF) \[(\w+)\](?::[^\n]*)? ===$",
+                           re.MULTILINE)
+
+
+def bundle_sections(user_message: str) -> dict[str, list[str]]:
+    """The section texts of a bundle as sent (``Bundle.user_message``), by evidence source: what the model
+    was shown under each header. The grader (v2) checks quotes against these."""
+    found = list(_SECTION_LINE.finditer(user_message))
+    sections: dict[str, list[str]] = {}
+    for match, after in zip(found, [*found[1:], None]):
+        end = after.start() - 2 if after else len(user_message) - 1  # sections joined by "\n\n", ending "\n"
+        sections.setdefault(match[2], []).append(user_message[match.end() + 1:end])
+    return sections
+
+
 # -- gathering ----------------------------------------------------------------------------------------
 
 

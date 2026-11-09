@@ -1,6 +1,6 @@
 """Runs an LLM baseline over the lab cases, one case at a time, safe to stop and resume.
 
-``python -m ci_triage.evaluation.llm_run --backend gemini|ollama [--mode log-only] [--resume]``
+``python -m ci_triage.evaluation.llm_run --backend gemini|ollama [--mode log-only] [--resume] [--grader v1|v2]``
 
 Settings come from one pre-registered config file (default ``configs/one_call_v2.toml``), printed at
 the start of every run and verbatim in every summary.md.
@@ -14,6 +14,8 @@ the start of every run and verbatim in every summary.md.
 - Gemini attempts are paced to ``max_requests_per_minute`` and counted against a daily cap
   (``results/llm_call_ledger.json``); when the cap is reached the run stops cleanly before the next
   attempt, keeps what is done, and tells you to ``--resume`` later.
+- Cases are graded with grader v2 (default), against the bundle sections the model was shown;
+  ``--grader v1`` reproduces the scores of runs graded before v2.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from ci_triage.evaluation.grader import CaseResult, grade_case
+from ci_triage.evaluation.grader import DEFAULT_GRADER, GRADERS, CaseResult, GraderVersion, grade_case
 from ci_triage.evaluation.ground_truth import GroundTruth, load_ground_truth
 from ci_triage.evaluation.metrics import summarise, to_markdown
 from ci_triage.labpaths import RESULTS_DIR
@@ -34,7 +36,7 @@ from ci_triage.llm.calling import CallLedger, DailyCapReached, LLMCallRecord, Mo
 from ci_triage.llm.clients import GeminiClient, LLMClient, OllamaClient
 from ci_triage.llm.config import DEFAULT_CONFIG, LoadedConfig, load_config
 from ci_triage.predictors.base import CaseView
-from ci_triage.predictors.llm_once import LLMOncePredictor, Status
+from ci_triage.predictors.llm_once import LLMOncePredictor, Status, bundle_sections
 from ci_triage.tools import Mode, Toolkit, make_toolkit
 
 LEDGER_FILE = "llm_call_ledger.json"
@@ -96,7 +98,8 @@ def read_records(path: Path) -> list[LLMCaseRecord]:
 
 
 def run_cases(predictor: LLMOncePredictor, cases: Sequence[EvalCase], directory: Path, *, resume: bool = False,
-              mode: Mode | str = Mode.FULL, echo: Callable[[str], None] = print) -> RunReport:
+              mode: Mode | str = Mode.FULL, echo: Callable[[str], None] = print,
+              grader: GraderVersion = DEFAULT_GRADER) -> RunReport:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "cases.jsonl"
     existing = read_records(path)
@@ -105,6 +108,9 @@ def run_cases(predictor: LLMOncePredictor, cases: Sequence[EvalCase], directory:
                          "or move it away to start over")
     known = {case.case_id for case in cases}
     kept = [r for r in existing if r.status in SCORED and r.case_id in known]  # api_error cases run again
+    other = sorted({r.result.grader for r in kept if r.result is not None} - {grader})
+    if other:
+        raise SystemExit(f"{path} was graded with grader {', '.join(other)}; resume it with --grader {other[0]}")
     secrets = predictor.caller.secrets
     line = lambda r: scrub(r.model_dump_json(), secrets) + "\n"  # noqa: E731 - never write a key
     with path.open("w", encoding="utf-8", newline="\n") as f:
@@ -124,7 +130,8 @@ def run_cases(predictor: LLMOncePredictor, cases: Sequence[EvalCase], directory:
         elapsed = time.perf_counter() - start
         result = None
         if outcome.status in SCORED:
-            result = grade_case(case.truth, outcome.diagnosis, toolkit.calls, outcome.error, wall_time_s=elapsed)
+            result = grade_case(case.truth, outcome.diagnosis, toolkit.calls, outcome.error, wall_time_s=elapsed,
+                                grader=grader, sections=bundle_sections(outcome.user_message))
         record = LLMCaseRecord(case_id=case.case_id, run_id=case.run_id, status=outcome.status, error=outcome.error,
                                repaired=outcome.repaired, llm_calls=outcome.calls, prompt_chars=outcome.prompt_chars,
                                prompt_tokens_estimate=outcome.prompt_tokens_estimate,
@@ -235,6 +242,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--resume", action="store_true", help="skip cases already done; re-run api_error ones")
     parser.add_argument("--daily-cap", type=int, default=None, help="attempts per day (default: from the config)")
     parser.add_argument("--out", type=Path, default=RESULTS_DIR, help="results root (default: results/)")
+    parser.add_argument("--grader", choices=GRADERS, default=DEFAULT_GRADER,
+                        help=f"grader version (default {DEFAULT_GRADER}); v1 reproduces runs graded before v2")
     args = parser.parse_args(argv)
     loaded = load_config(args.config)
     mode = Mode(args.mode)
@@ -243,7 +252,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     predictor = LLMOncePredictor(make_caller(make_client(args.backend, loaded), loaded, args.out, args.daily_cap),
                                  loaded)
     name = predictor.name if mode is Mode.FULL else f"{predictor.name}-{mode.value}"
-    report = run_cases(predictor, lab_cases(mode), args.out / name, resume=args.resume, mode=mode)
+    report = run_cases(predictor, lab_cases(mode), args.out / name, resume=args.resume, mode=mode,
+                       grader=args.grader)
     print(f"{report.ran} cases run, {report.skipped} skipped as done; wrote {report.directory}")
     if report.api_errors:
         print(f"api_error, re-run with --resume: {', '.join(report.api_errors)}")
