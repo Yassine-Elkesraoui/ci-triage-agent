@@ -23,6 +23,12 @@ Every tool call goes through the case's toolkit, so its call log holds every out
 ``AgentOutcome.tool_calls`` lists the agent's own calls (after the ``bundle_tool_calls`` the bundle took)
 and which were shown. A bad tool name or bad arguments come back as a NotAvailable result, never an error.
 
+Repeated calls: a call with the same name and arguments as one of the agent's earlier calls in the case
+(argument key order aside) is not run again; its result is the earlier output, prefixed with the line
+``Repeated call: same result as turn N.``. It is recorded with ``repeat_of`` (the earlier call's index in
+``tool_calls``) and counted in ``repeated_calls``; the turn that made it counts as a turn as usual. The
+bundle's own calls are not the agent's and are never treated as earlier calls.
+
 This package must not import ``ci_triage.evaluation``: ground truth and grading live there.
 """
 
@@ -56,6 +62,7 @@ class AgentToolCall(BaseModel):
     output_chars: int  # of the rendered result
     available: bool  # False: a NotAvailable result (unknown tool, bad arguments, out of scope, ...)
     shown: bool = True  # False: dropped before the model saw it, to fit the context budget
+    repeat_of: int | None = None  # index in tool_calls of the earlier identical call; not run again
 
 
 class TurnRecord(BaseModel):
@@ -75,6 +82,7 @@ class AgentOutcome(BaseModel):
     calls: list[LLMCallRecord] = Field(default_factory=list)  # every model call, repair included
     turns: list[TurnRecord] = Field(default_factory=list)
     tool_calls: list[AgentToolCall] = Field(default_factory=list)
+    repeated_calls: int = 0  # tool calls identical to an earlier one, answered from it, not run again
     turns_used: int = 0  # model turns, the repair call left out
     context_forced: bool = False  # the answer came early, or results were dropped, for the context budget
     max_turns_forced: bool = False  # the answer turn was the last allowed one
@@ -103,6 +111,15 @@ class _State(TypedDict, total=False):
     pending: list[ToolCallRequest]
     answer: str
     stop: bool
+
+
+def repeat_prefix(turn: int) -> str:
+    return f"Repeated call: same result as turn {turn}."
+
+
+def call_key(name: Any, arguments: Any) -> str:
+    """What makes two tool calls identical: the name and the arguments (JSON objects compare unordered)."""
+    return json.dumps([str(name), arguments], sort_keys=True, default=repr)
 
 
 def _last_exchange(messages: list[Message]) -> int | None:
@@ -137,6 +154,7 @@ class ToolAgent:
         outcome = AgentOutcome(user_message=user, diff_included=bundle.diff_included,
                                bundle_tool_calls=len(toolkit.calls), prompt_chars=len(prompt.system) + len(user))
         specs = tool_specs(toolkit)
+        earlier: dict[str, tuple[int, str]] = {}  # call key -> (index in tool_calls, rendered output)
         room = config.context.room(config.generation.max_output_tokens)
 
         def model_turn(state: _State) -> _State:
@@ -182,13 +200,23 @@ class ToolAgent:
         def run_tools(state: _State) -> _State:
             messages = list(state["messages"])
             for request in state["pending"]:
-                result = toolkit.call(request.name, request.arguments)
+                key, name = call_key(request.name, request.arguments), str(request.name)[:200]
+                if key in earlier:
+                    index, output = earlier[key]
+                    first = outcome.tool_calls[index]
+                    content = f"{repeat_prefix(first.turn)}\n{output}"
+                    messages.append(Message("tool", content, tool_name=name, tool_call_id=request.id))
+                    outcome.tool_calls.append(AgentToolCall(turn=state["turn"], name=name, arguments=first.arguments,
+                                                            output_chars=len(content), available=first.available,
+                                                            repeat_of=index))
+                    outcome.repeated_calls += 1
+                    continue
+                output = render(toolkit.call(request.name, request.arguments))
                 logged = toolkit.calls[-1]
-                messages.append(Message("tool", render(result), tool_name=str(request.name)[:200],
-                                        tool_call_id=request.id))
-                outcome.tool_calls.append(AgentToolCall(turn=state["turn"], name=str(request.name)[:200],
-                                                        arguments=logged.arguments, output_chars=logged.output_chars,
-                                                        available=logged.available))
+                earlier[key] = (len(outcome.tool_calls), output)
+                messages.append(Message("tool", output, tool_name=name, tool_call_id=request.id))
+                outcome.tool_calls.append(AgentToolCall(turn=state["turn"], name=name, arguments=logged.arguments,
+                                                        output_chars=logged.output_chars, available=logged.available))
             return {"messages": messages, "pending": []}
 
         def answer(state: _State) -> _State:

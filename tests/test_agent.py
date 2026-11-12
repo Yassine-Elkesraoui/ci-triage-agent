@@ -20,7 +20,7 @@ import synthetic as s
 from conftest import CASES, LAB
 
 from ci_triage.agent.config import ContextSettings, LoadedAgentConfig, load_agent_config
-from ci_triage.agent.loop import AgentToolCall, ToolAgent, tool_specs
+from ci_triage.agent.loop import AgentToolCall, ToolAgent, repeat_prefix, tool_specs
 from ci_triage.diagnosis import Category, Diagnosis, EvidenceSource
 from ci_triage.evaluation.agent_run import (AgentCaseRecord, check_run_plan, make_agent_caller, read_agent_records,
                                             run_cases, run_directory, seen_sections)
@@ -204,9 +204,10 @@ def test_max_turns_forces_the_answer():
 
 
 def test_a_tool_call_on_the_last_turn_is_not_run_and_gets_a_repair():
-    script = [FakeTurn.calling(("get_jobs", {"run_id": s.RUN_ID}))] * 8 + [ANSWER]
+    # distinct calls (offsets differ), so the repeated-call guard plays no part
+    script = [FakeTurn.calling(("get_job_log", {"job_id": s.JOB_ID, "offset": i})) for i in range(8)] + [ANSWER]
     outcome, toolkit, _ = run_one(FakeClient.of(script))
-    assert len(outcome.tool_calls) == 7 and len(toolkit.calls) == outcome.bundle_tool_calls + 7
+    assert outcome.repeated_calls == 0 and len(outcome.tool_calls) == 7 and len(toolkit.calls) == outcome.bundle_tool_calls + 7
     assert outcome.status == "ok" and outcome.repaired and [c.purpose for c in outcome.calls][-2:] == ["answer", "repair"]
 
 
@@ -267,6 +268,107 @@ def test_log_only_offers_no_diff_tool_and_refuses_one_called_anyway():
     assert [c.available for c in outcome.tool_calls] == [False, False, False]
     assert all(LOG_ONLY_REASON in m.content for m in client.chats[1].messages if m.role == "tool")
     assert "compare" not in source.calls and "get_commit" not in source.calls
+
+
+# -- repeated calls -------------------------------------------------------------------------------------------
+
+
+def _tool_results(chat) -> list[str]:
+    return [m.content for m in chat.messages if m.role == "tool"]
+
+
+def test_a_repeated_call_is_not_run_again_and_returns_the_earlier_output():
+    fees = ("get_file", {"path": "shelfwise/fees.py"})
+    client = FakeClient.of([FakeTurn.calling(fees), FakeTurn.calling(("get_jobs", {"run_id": s.RUN_ID})),
+                            FakeTurn.calling(fees), ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert outcome.status == "ok" and outcome.turns_used == 4 and [t.tool_calls for t in outcome.turns] == [1, 1, 1, 0]
+    assert len(toolkit.calls) == outcome.bundle_tool_calls + 2  # get_file ran once
+    assert [t for t in toolkit.calls[outcome.bundle_tool_calls:] if t.tool == "get_file"] == \
+        [toolkit.calls[outcome.bundle_tool_calls]]
+    first, _, again = _tool_results(client.chats[3])
+    assert first == render(toolkit.call("get_file", {"path": "shelfwise/fees.py"})) and FEES_LINE in first
+    assert again == "Repeated call: same result as turn 1.\n" + first == f"{repeat_prefix(1)}\n{first}"
+    assert outcome.repeated_calls == 1 and [c.repeat_of for c in outcome.tool_calls] == [None, None, 0]
+    call = outcome.tool_calls[2]
+    assert (call.turn, call.name, call.arguments, call.available, call.shown, call.output_chars) == \
+        (3, "get_file", {"path": "shelfwise/fees.py"}, True, True, len(again))
+
+
+def test_a_repeat_in_the_same_turn_and_argument_order_do_not_run_it_twice():
+    client = FakeClient.of([FakeTurn.calling(("get_job_log", {"job_id": s.JOB_ID, "offset": 5}),
+                                             ("get_job_log", {"offset": 5, "job_id": s.JOB_ID})), ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert len(toolkit.calls) == outcome.bundle_tool_calls + 1 and outcome.repeated_calls == 1
+    first, again = _tool_results(client.chats[1])
+    assert again == f"{repeat_prefix(1)}\n{first}"
+
+
+def test_different_arguments_or_names_are_not_repeats():
+    client = FakeClient.of([FakeTurn.calling(("get_job_log", {"job_id": s.JOB_ID})),
+                            FakeTurn.calling(("get_job_log", {"job_id": s.JOB_ID, "offset": 0}),  # same defaults
+                                             ("get_job_log", {"job_id": str(s.JOB_ID)}),
+                                             ("extract_failure_block", {"job_id": s.JOB_ID})), ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert outcome.repeated_calls == 0 and len(toolkit.calls) == outcome.bundle_tool_calls + 4
+    assert not any(r.startswith("Repeated call") for r in _tool_results(client.chats[2]))
+
+
+def test_a_call_the_bundle_made_is_not_a_repeat_for_the_agent():
+    toolkit, _ = s.toolkit(Mode.FULL)
+    gather_bundle(CaseView(s.RUN_ID), toolkit, LOADED.bundle.config.budget, len(LOADED.bundle.prompt.system),
+                  MAX_OUT)
+    bundle_call = toolkit.calls[0]
+    client = FakeClient.of([FakeTurn.calling((bundle_call.tool, bundle_call.arguments)), ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert toolkit.calls[0].tool == bundle_call.tool and toolkit.calls[0].arguments == bundle_call.arguments
+    assert outcome.repeated_calls == 0 and len(toolkit.calls) == outcome.bundle_tool_calls + 1
+
+
+def test_a_repeated_unavailable_call_carries_the_earlier_result():
+    bad = ("get_jobs", {"run_id": "not-a-number"})
+    client = FakeClient.of([FakeTurn.calling(bad, ("rm_rf", {})), FakeTurn.calling(bad, ("rm_rf", {})), ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert outcome.repeated_calls == 2 and len(toolkit.calls) == outcome.bundle_tool_calls + 2
+    assert [c.available for c in outcome.tool_calls] == [False] * 4
+    assert [c.repeat_of for c in outcome.tool_calls] == [None, None, 0, 1]
+    results = _tool_results(client.chats[2])
+    assert results[2:] == [f"{repeat_prefix(1)}\n{results[0]}", f"{repeat_prefix(1)}\n{results[1]}"]
+
+
+def test_repeats_up_to_the_turn_limit_still_count_as_turns():
+    client = FakeClient.of([FakeTurn.calling(("get_jobs", {"run_id": s.RUN_ID}))] * 7 + [ANSWER])
+    outcome, toolkit, _ = run_one(client)
+    assert outcome.turns_used == 8 and outcome.max_turns_forced and outcome.repeated_calls == 6
+    assert len(toolkit.calls) == outcome.bundle_tool_calls + 1
+    assert [c.repeat_of for c in outcome.tool_calls] == [None] + [0] * 6
+    assert all(r == f"{repeat_prefix(1)}\n{_tool_results(client.chats[7])[0]}"
+               for r in _tool_results(client.chats[7])[1:])
+
+
+def test_records_and_grounding_with_a_repeated_call(tmp_path):
+    fees = ("get_file", {"path": "shelfwise/fees.py"})
+    seen = answer_quoting(("E       assert 2.5 == 5.0", "log"), (FEES_LINE, "file"))
+    client = FakeClient.of([FakeTurn.calling(fees), FakeTurn.calling(fees), seen])
+    run_cases(make_agent(client), synthetic_cases("a", mode=Mode.LOG_ONLY), tmp_path, mode=Mode.LOG_ONLY,
+              echo=quiet, env={})
+    (r,) = read_agent_records(tmp_path / "cases.jsonl")
+    assert r.repeated_calls == 1 and [t.repeat_of for t in r.tool_calls] == [None, 0]
+    assert (r.result.quotes, r.result.quotes_grounded) == (2, 2)
+    summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "| repeated tool calls (same name and arguments, not run again) | 1 |" in summary
+
+
+def test_seen_sections_pair_the_toolkit_log_with_the_calls_that_ran():
+    toolkit, _ = s.toolkit(Mode.LOG_ONLY)
+    bundle_calls = len(toolkit.calls)
+    toolkit.call("get_file", {"path": "shelfwise/fees.py"})
+    ran = AgentToolCall(turn=1, name="get_file", arguments={}, output_chars=1, available=True)
+    repeat = ran.model_copy(update={"turn": 2, "repeat_of": 0})
+    sections = seen_sections("", toolkit.calls, bundle_calls, [ran, repeat])
+    assert any(FEES_LINE in t for t in sections[EvidenceSource.FILE])
+    with pytest.raises(ValueError):
+        seen_sections("", toolkit.calls, bundle_calls, [ran, ran])
 
 
 # -- repair, invalid output, API errors ---------------------------------------------------------------------

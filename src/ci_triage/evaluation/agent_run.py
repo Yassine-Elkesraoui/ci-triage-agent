@@ -7,7 +7,7 @@ every run and verbatim in every summary.md. Like ``llm_run``:
 
 - each case is appended to ``results/agent_v1-<backend>[-<mode>]/cases.jsonl`` as soon as it is done:
   status, every model call (model_version, tokens, latency, retries), every turn, every tool call (name,
-  arguments, output size, whether it was shown), the bundle, the environment and, unless api_error, the
+  arguments, output size, whether it was shown, whether it repeated an earlier call), repeated_calls, the bundle, the environment and, unless api_error, the
   grades; with Ollama, the environment holds the server version and basic hardware facts;
 - ``ok`` and ``invalid_output`` cases are scored (invalid_output as wrong); api_error cases are re-run by
   ``--resume``; Gemini attempts are paced and counted against the daily cap, shared with D6a
@@ -63,6 +63,7 @@ class AgentCaseRecord(BaseModel):
     turns: list[TurnRecord]
     turns_used: int
     tool_calls: list[AgentToolCall]
+    repeated_calls: int = 0  # tool calls answered from an earlier identical call, not run again
     bundle_tool_calls: int
     context_forced: bool
     max_turns_forced: bool
@@ -92,11 +93,14 @@ class AgentRunReport:
 def seen_sections(user_message: str, calls: Sequence[ToolCall], bundle_tool_calls: int,
                   agent_calls: Sequence[AgentToolCall]) -> dict[EvidenceSource, list[str]]:
     """Everything the agent saw, by evidence source: the bundle's sections, then the outputs of its own
-    tool calls that were shown to it (``calls`` is the toolkit's log; the agent's calls follow the bundle's)."""
+    tool calls that were shown to it (``calls`` is the toolkit's log; the agent's calls follow the bundle's).
+    A repeated call was not run again: the toolkit logged only the earlier one, whose output it showed."""
     own = list(calls[bundle_tool_calls:])
-    if len(own) != len(agent_calls):
-        raise ValueError(f"toolkit logged {len(own)} agent calls, the agent recorded {len(agent_calls)}")
-    shown = [call for call, agent in zip(own, agent_calls, strict=True) if agent.shown]
+    run = [i for i, agent in enumerate(agent_calls) if agent.repeat_of is None]
+    if len(own) != len(run):
+        raise ValueError(f"toolkit logged {len(own)} agent calls, the agent ran {len(run)}")
+    seen = {i if agent.repeat_of is None else agent.repeat_of for i, agent in enumerate(agent_calls) if agent.shown}
+    shown = [call for call, i in zip(own, run, strict=True) if i in seen]
     sections: dict[EvidenceSource, list[str]] = {source: [] for source in EvidenceSource}
     for source, texts in bundle_sections(user_message).items():
         sections[EvidenceSource(source)] += texts
@@ -167,7 +171,8 @@ def run_cases(agent: ToolAgent, cases: Sequence[EvalCase], directory: Path, *, r
         record = AgentCaseRecord(
             case_id=case.case_id, run_id=case.run_id, status=outcome.status, error=outcome.error,
             repaired=outcome.repaired, llm_calls=outcome.calls, turns=outcome.turns, turns_used=outcome.turns_used,
-            tool_calls=outcome.tool_calls, bundle_tool_calls=outcome.bundle_tool_calls,
+            tool_calls=outcome.tool_calls, repeated_calls=outcome.repeated_calls,
+            bundle_tool_calls=outcome.bundle_tool_calls,
             context_forced=outcome.context_forced, max_turns_forced=outcome.max_turns_forced,
             prompt_chars=outcome.prompt_chars, max_prompt_tokens_estimate=outcome.max_prompt_tokens_estimate,
             diff_included=outcome.diff_included, wall_time_s=elapsed, environment=case_env, result=result,
@@ -226,6 +231,7 @@ def summary_markdown(agent: ToolAgent, report: AgentRunReport, n_cases: int, mod
         if records else "| tool calls | - |",
         f"| tool calls by tool | {by_tool} |",
         f"| tool results not available (bad name, arguments or scope) | {sum(not t.available for t in tool_calls)} |",
+        f"| repeated tool calls (same name and arguments, not run again) | {sum(r.repeated_calls for r in records)} |",
         f"| answer forced by the turn limit | {sum(r.max_turns_forced for r in records)} |",
         f"| context_forced (answer early or results dropped) | {sum(r.context_forced for r in records)} |",
         f"| tool results dropped, never shown | {sum(not t.shown for t in tool_calls)} |",
