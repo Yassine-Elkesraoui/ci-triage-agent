@@ -590,6 +590,24 @@ def test_gemini_contents_carry_calls_signatures_and_grouped_results():
         [("get_jobs", "c1", {"available": True, "jobs": []}), ("get_run", "c2", {"available": True, "id": 1})]
 
 
+def test_gemini_sends_a_repeated_result_structured_and_ollama_as_text():
+    gtypes = pytest.importorskip("google.genai.types")
+    fees = ("get_file", {"path": "shelfwise/fees.py"})
+    client = FakeClient.of([FakeTurn.calling(fees), FakeTurn.calling(fees), ANSWER])
+    outcome, _, _ = run_one(client)
+    assert outcome.repeated_calls == 1
+    messages = client.chats[2].messages
+    first, again = _tool_results(client.chats[2])
+    assert again == f"{repeat_prefix(1)}\n{first}"
+    responses = [p.function_response.response for c in gemini_contents(gtypes, messages) for p in c.parts
+                 if getattr(p, "function_response", None)]
+    original = json.loads(first)
+    assert isinstance(original, dict) and FEES_LINE in json.dumps(original)
+    assert responses == [original, {"note": "Repeated call: same result as turn 1.", "result": original}]
+    # Ollama keeps the text form: the same note line, then the same result
+    assert [m["content"] for m in ollama_messages("sys", messages) if m["role"] == "tool"] == [first, again]
+
+
 def _stub_genai(monkeypatch, response):
     seen = {}
 

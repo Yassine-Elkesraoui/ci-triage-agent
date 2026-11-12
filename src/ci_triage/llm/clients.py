@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import subprocess
 import time
 from collections.abc import Iterable, Sequence
@@ -208,6 +209,19 @@ class GeminiClient:
             tool_calls=calls)
 
 
+_REPEATED = re.compile(r"(Repeated call: same result as turn \d+\.)\n(.*)", re.DOTALL)
+
+
+def gemini_tool_response(content: str) -> dict[str, Any]:
+    """A tool message's content as a function_response object. A repeated call's result (the agent's
+    ``Repeated call: same result as turn N.`` line, then the earlier output) stays structured:
+    ``{"note": <that line>, "result": <the earlier result, as its own function_response carried it>}``."""
+    repeated = _REPEATED.fullmatch(content)
+    if repeated:
+        return {"note": repeated.group(1), "result": _as_object(repeated.group(2))}
+    return _as_object(content)
+
+
 def gemini_contents(types: Any, messages: Sequence[Message]) -> list[Any]:
     """``messages`` as Gemini contents: tool calls as function_call parts (with their thought signatures),
     consecutive tool results as one user turn of function_response parts."""
@@ -215,7 +229,7 @@ def gemini_contents(types: Any, messages: Sequence[Message]) -> list[Any]:
     for m in messages:
         if m.role == "tool":
             part = types.Part(function_response=types.FunctionResponse(
-                id=m.tool_call_id, name=m.tool_name, response=_as_object(m.content)))
+                id=m.tool_call_id, name=m.tool_name, response=gemini_tool_response(m.content)))
             previous = contents[-1] if contents else None
             if previous is not None and previous.role == "user" and all(
                     getattr(p, "function_response", None) for p in previous.parts):
