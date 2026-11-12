@@ -4,7 +4,7 @@ DIR is a results directory (``results/<name>[-<mode>]``, from ``evaluation.run``
 with none, every directory under results/ that holds a cases.jsonl. For each saved case, the recorded tool
 calls are replayed offline on a fresh toolkit for the run's mode (the replay source is deterministic, so
 the outputs are the ones the predictor got; a replayed call whose size or availability differs is an
-error), and the saved diagnosis is graded again with grader v1 and grader v2. One-call LLM cases are graded
+error), and the saved diagnosis is graded again with grader v1, v2 and v2.1. One-call LLM cases are graded
 against the sections of their saved bundle. The grader a run was saved with (v1 for every run before
 grader v2) must reproduce its saved grades exactly.
 
@@ -49,6 +49,7 @@ class Regraded:
     stored: list[CaseResult]  # as saved
     v1: list[CaseResult]
     v2: list[CaseResult]
+    v2_1: list[CaseResult]
 
     @property
     def saved_grader(self) -> str:
@@ -60,7 +61,7 @@ class Regraded:
 
     @property
     def regraded_as_saved(self) -> list[CaseResult]:
-        return self.v1 if self.saved_grader == "v1" else self.v2
+        return {"v1": self.v1, "v2": self.v2, "v2.1": self.v2_1}[self.saved_grader]
 
     @property
     def reproduces(self) -> bool:
@@ -114,15 +115,16 @@ def regrade_run(directory: Path, lab: LabData | None = None,
     directory = Path(directory)
     name, mode = parse_results_name(directory.name)
     lab_cases = {case.case_id: case for case in load_cases(lab)}
-    stored, v1, v2 = [], [], []
+    stored, v1, v2, v2_1 = [], [], [], []
     for saved, message in _saved_cases(directory):
         calls = replay_calls(lab_cases[saved.case_id], lab, mode, saved.calls)
         args = (truth[saved.case_id], saved.diagnosis, calls, saved.error)
+        sections = None if message is None else bundle_sections(message)
         stored.append(saved)
         v1.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v1"))
-        v2.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2",
-                             sections=None if message is None else bundle_sections(message)))
-    return Regraded(directory, name, mode, stored, v1, v2)
+        v2.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2", sections=sections))
+        v2_1.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2.1", sections=sections))
+    return Regraded(directory, name, mode, stored, v1, v2, v2_1)
 
 
 def write_v2(run: Regraded) -> Path:

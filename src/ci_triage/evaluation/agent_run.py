@@ -13,9 +13,10 @@ every run and verbatim in every summary.md. Like ``llm_run``:
   ``--resume``; Gemini attempts are paced and counted against the daily cap, shared with D6a
   (``results/llm_call_ledger.json``), and the run stops cleanly when it is reached.
 
-Grading (grader v2 by default) checks quotes against everything the agent saw: the bundle's sections and
+Grading (grader v2.1 by default) checks quotes against everything the agent saw: the bundle's sections and
 the results of its own tool calls that were shown to it, by evidence source. Results dropped to fit the
-context budget were never seen and do not count.
+context budget were never seen and do not count. Under v2.1, a "history" quote found in a list_runs,
+get_run or get_jobs result the agent saw breaks no quote rule.
 
 The pre-registered run plan (``[[run]]`` in the config) is enforced: a run starts only when every earlier
 run of the same backend in the plan has all its cases scored.
@@ -90,17 +91,24 @@ class AgentRunReport:
         return [r.case_id for r in self.records if r.status == "api_error"]
 
 
-def seen_sections(user_message: str, calls: Sequence[ToolCall], bundle_tool_calls: int,
-                  agent_calls: Sequence[AgentToolCall]) -> dict[EvidenceSource, list[str]]:
-    """Everything the agent saw, by evidence source: the bundle's sections, then the outputs of its own
-    tool calls that were shown to it (``calls`` is the toolkit's log; the agent's calls follow the bundle's).
-    A repeated call was not run again: the toolkit logged only the earlier one, whose output it showed."""
+def shown_calls(calls: Sequence[ToolCall], bundle_tool_calls: int,
+                agent_calls: Sequence[AgentToolCall]) -> list[ToolCall]:
+    """The agent's own tool calls whose outputs were shown to it (``calls`` is the toolkit's log; the agent's
+    calls follow the bundle's). A repeated call was not run again: the toolkit logged only the earlier one,
+    whose output it showed."""
     own = list(calls[bundle_tool_calls:])
     run = [i for i, agent in enumerate(agent_calls) if agent.repeat_of is None]
     if len(own) != len(run):
         raise ValueError(f"toolkit logged {len(own)} agent calls, the agent ran {len(run)}")
     seen = {i if agent.repeat_of is None else agent.repeat_of for i, agent in enumerate(agent_calls) if agent.shown}
-    shown = [call for call, i in zip(own, run, strict=True) if i in seen]
+    return [call for call, i in zip(own, run, strict=True) if i in seen]
+
+
+def seen_sections(user_message: str, calls: Sequence[ToolCall], bundle_tool_calls: int,
+                  agent_calls: Sequence[AgentToolCall]) -> dict[EvidenceSource, list[str]]:
+    """Everything the agent saw, by evidence source: the bundle's sections, then the outputs of its own
+    tool calls that were shown to it (``shown_calls``)."""
+    shown = shown_calls(calls, bundle_tool_calls, agent_calls)
     sections: dict[EvidenceSource, list[str]] = {source: [] for source in EvidenceSource}
     for source, texts in bundle_sections(user_message).items():
         sections[EvidenceSource(source)] += texts
@@ -166,8 +174,9 @@ def run_cases(agent: ToolAgent, cases: Sequence[EvalCase], directory: Path, *, r
         if outcome.status in SCORED:
             sections = seen_sections(outcome.user_message, toolkit.calls, outcome.bundle_tool_calls,
                                      outcome.tool_calls)
+            seen = shown_calls(toolkit.calls, outcome.bundle_tool_calls, outcome.tool_calls)
             result = grade_case(case.truth, outcome.diagnosis, toolkit.calls, outcome.error, wall_time_s=elapsed,
-                                grader=grader, sections=sections)
+                                grader=grader, sections=sections, seen_calls=seen)
         record = AgentCaseRecord(
             case_id=case.case_id, run_id=case.run_id, status=outcome.status, error=outcome.error,
             repaired=outcome.repaired, llm_calls=outcome.calls, turns=outcome.turns, turns_used=outcome.turns_used,

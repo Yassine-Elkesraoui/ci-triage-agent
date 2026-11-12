@@ -170,7 +170,7 @@ def _v2_rows(s: Summary) -> list[str]:
 
 def to_markdown(summary: Summary) -> str:
     s = summary
-    v2 = s.grader == "v2"
+    v2 = s.grader != "v1"  # v2 or v2.1
     fix_rows = _v2_rows(s) if v2 else [
         f"| fix match exact / partial / none | {_pct(s.fix_exact_rate)} / {_pct(s.fix_partial_rate)} / "
         f"{_pct(s.fix_none_rate)} |"]
@@ -178,7 +178,7 @@ def to_markdown(summary: Summary) -> str:
         f"# Evaluation: {s.predictor}" + (f" ({s.mode} mode)" if s.mode != "full" else ""),
         "",
         f"{s.cases} cases" + (f", {s.errors} with no diagnosis (the predictor raised)" if s.errors else "") + "."
-        + (" Graded with grader v2: normalised grounding, quote rules, remove-type fixes left to a judge." if v2
+        + (f" Graded with grader {s.grader}: normalised grounding, quote rules, remove-type fixes left to a judge." if v2
            else ""),
         "",
         "| metric | value |",

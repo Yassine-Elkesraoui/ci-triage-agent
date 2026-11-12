@@ -206,9 +206,9 @@ def test_grade_case_v2_without_sections_reads_the_tool_outputs():
     failed = next(job for job in jobs.jobs if job.conclusion == "failure")
     toolkit.call("extract_failure_block", {"job_id": failed.id})
     d = _diagnosis([("ERROR:   No matching distribution found for pydantic==9.9.9", "log"), (failed.name, "history")])
-    r = grade_case(TRUTH["inj-011"], d, toolkit.calls)  # v2 is the default
+    r = grade_case(TRUTH["inj-011"], d, toolkit.calls, grader="v2")
     assert r.grader == "v2" and r.evidence_grounded and r.quote_rules.followed == 2
-    assert not grade_case(TRUTH["inj-011"], d, []).evidence_grounded  # nothing fetched, nothing grounded
+    assert not grade_case(TRUTH["inj-011"], d, [], grader="v2").evidence_grounded  # nothing fetched, nothing grounded
 
 
 def test_unknown_grader_and_mixed_graders_are_refused():

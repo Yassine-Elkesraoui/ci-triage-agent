@@ -406,7 +406,7 @@ def test_500_is_retried_and_an_api_error_is_not_scored(tmp_path):
 # -- grounding: what the agent saw ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("grader", ["v1", "v2"])
+@pytest.mark.parametrize("grader", ["v1", "v2", "v2.1"])
 def test_grounding_accepts_quotes_from_tool_results_the_agent_saw(tmp_path, grader):
     seen = answer_quoting(("E       assert 2.5 == 5.0", "log"), (FEES_LINE, "file"))
     looked = FakeClient.of([FakeTurn.calling(("get_file", {"path": "shelfwise/fees.py"})), seen])
@@ -456,7 +456,7 @@ def test_records_hold_turns_tool_calls_tokens_latency_and_environment(tmp_path):
     (r,) = read_agent_records(tmp_path / "cases.jsonl")
     assert r.turns_used == 2 and [t.name for t in r.tool_calls] == ["get_file"] and r.tool_calls[0].output_chars > 0
     assert r.environment == env and all(c.model_version and c.tokens_in and c.latency_s is not None for c in r.llm_calls)
-    assert r.bundle_tool_calls > 0 and r.result.grader == "v2" and r.user_message.startswith("Failed workflow run")
+    assert r.bundle_tool_calls > 0 and r.result.grader == "v2.1" and r.user_message.startswith("Failed workflow run")
     summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
     for row in ("| model turns per case, mean / max | 2.00 / 2 |", "| tool calls by tool | get_file 1 |",
                 "ollama_server_version 0.0-test", "| category accuracy | 1/1 (100.0%) |", "agent_v1.toml"):
