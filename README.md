@@ -7,8 +7,38 @@ pinned at v1.0 as the `lab/` submodule: 60 labelled CI failures in 6 categories.
 Status: milestones D1 (scaffold), D2 (replay layer), D3 (tools), D4 (diagnosis format and evaluation
 harness), D5a (a rules-only baseline, committed before its first evaluation), D5b (its first score, in
 `reports/`), D5c (the log-only evaluation mode), D6a (a one-call LLM baseline, scored in `reports/`),
-grader v2 (`reports/grader-v2-regrade.md`) and D6b (a tool-using agent, pre-registered and not yet
-evaluated). Tests need no network and no keys.
+grader v2 (`reports/grader-v2-regrade.md`), D6b (a tool-using agent, scored in `reports/`) and D7 (the
+consolidated results, `reports/d7-summary.md`, tagged `results-v1`). Tests need no network and no keys.
+
+## Results
+
+Five predictors on the 60 lab cases, graded with grader v2.1. **Log-only** (no diff available) is the
+headline condition; **full** mode adds the diff from the last green run. The LLM predictors run on
+`gemini-3.5-flash-lite` (hosted) and `qwen3.5:4b` (local, Ollama). Each is a single run at temperature 0.
+
+| predictor | log-only accuracy | log-only macro-F1 | full accuracy | full macro-F1 |
+|---|---|---|---|---|
+| rules v1 (no LLM) | 39/60 (65.0%) | 0.593 | **58/60 (96.7%)** | **0.966** |
+| one-call v2, Gemini | 49/60 (81.7%) | 0.783 | 50/60 (83.3%) | 0.799 |
+| one-call v2, Ollama | 43/60 (71.7%) | 0.683 | 42/60 (70.0%) | 0.664 |
+| agent v1, Gemini | 47/60 (78.3%) | 0.781 | 41/60 (68.3%) | 0.698 |
+| agent v1, Ollama | **51/60 (85.0%)** | **0.843** | 42/60 (70.0%) | 0.690 |
+
+![Category accuracy of the five predictors in both modes](reports/figures/d7-accuracy.png)
+
+- Without a diff, the LLMs beat the rules. The small local model with tools is best: 51/60 against 39/60
+  (exact McNemar p = 0.004).
+- With the diff, the hand-written rules win clearly (58/60). Both agents are significantly worse than the
+  rules there.
+- Flaky tests stay hard for every LLM predictor (1–4 of 10), and the LLMs are overconfident: wrong answers
+  come at 0.95–1.00 confidence.
+
+The summary, significance tests, pre-registration timeline and limitations are in
+[`reports/d7-summary.md`](reports/d7-summary.md). The detailed reports are:
+- rules: [D5b](reports/d5b-rules-v1.md), [D5c](reports/d5c-rules-v1-log-only.md);
+- one-call: [D6a Gemini](reports/d6a-one-call-v2-gemini.md), [D6a Ollama](reports/d6a-one-call-v2-ollama.md);
+- agent: [D6b](reports/d6b-agent-v1.md);
+- grading: [grader v2](reports/grader-v2-regrade.md).
 
 ## Setup
 
@@ -20,6 +50,7 @@ pip install -e ".[dev]"
 pytest
 pip install -e ".[llm]"              # only for the LLM baselines: google-genai, ollama
 pip install -e ".[agent]"            # the D6b agent's loop: langgraph (CI installs it; its tests need no SDK)
+pip install -e ".[plot]"             # only for the D7 figure: matplotlib (python scripts/plot_d7.py)
 ```
 
 ## Layout
@@ -63,7 +94,8 @@ src/ci_triage/
     regrade.py          re-grades saved runs offline (no model calls), with grader v1 and v2
 configs/                pre-registered LLM settings (one_call_v1.toml, one_call_v2.toml, agent_v1.toml)
 prompts/                LLM prompts (one_call_v1.md, one_call_v2.md, agent_v1.md)
-reports/                official scores, committed (results/ is gitignored run output)
+reports/                official scores, committed (results/ is gitignored run output); figures/ for D7
+scripts/plot_d7.py      the D7 accuracy figure, from the saved runs under results/
 tests/
   oracle.py             the oracle predictor: reads ground truth, so it lives here only
   synthetic.py          a synthetic failing run built in code (not a lab case), for the LLM tests
@@ -206,7 +238,7 @@ python -m ci_triage.evaluation.llm_run --backend gemini --mode log-only --resume
 python tests/smoke_llm.py gemini ollama        # live smoke test on the synthetic run, not a lab case
 ```
 
-## D6b: the tool-using agent (pre-registered, not yet evaluated)
+## D6b: the tool-using agent (scored: `reports/d6b-agent-v1.md`)
 
 The agent differs from the D6a baseline only by its tools and its turns, so D6b vs D6a measures those
 and nothing else. It starts from exactly the one-call bundle for its mode, built by the same code with
