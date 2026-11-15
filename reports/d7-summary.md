@@ -172,8 +172,9 @@ before any run are listed with their reason. Dates and times are git author time
 7. **Grader changes came after seeing results.** Grader v2 followed the D6a audit, and v2.1 the agent
    design. Both are documented, applied to every saved run, and leave category metrics unchanged. They do
    change grounding and fix figures.
-8. **The Ollama server version drifted:** 0.40.15 for D6a (read afterwards; the runs did not record it),
-   0.40.16 for D6b (recorded). The server logs show the switch on 2026-11-12, between 22:05 and 22:08 UTC,
+8. **The Ollama server version drifted:** 0.40.14 or 0.40.15 for D6a (not recorded: 0.40.14 was installed on
+   2026-11-04 and 0.40.15 was read on 2026-11-09, after the D6a runs of 2026-11-07), and 0.40.16 for D6b
+   (recorded). The server logs show the switch to 0.40.16 on 2026-11-12, between 22:05 and 22:08 UTC,
    before any D6b run. The weights digest is the same. The
    context window also differs by design: 8,192 for D6a, 16,384 for D6b.
 9. **Single runs, no variance measured.** Every LLM figure is one run at temperature 0 and seed 42. Hosted
@@ -233,7 +234,7 @@ v2, since those predictors saw no history-tool output of their own. The agent ru
 | pydantic | 2.14.1 |
 | google-genai | 2.34.0 |
 | ollama, Python client | 0.6.3 |
-| Ollama server | 0.40.15 for D6a, 0.40.16 for D6b |
+| Ollama server | D6a 0.40.14 or 0.40.15 (not recorded), D6b 0.40.16 |
 | langgraph | 1.2.17 (pinned) |
 | langchain-core | 1.7.6 |
 | matplotlib, figure only | 3.11.2 |

@@ -1,17 +1,24 @@
 """Re-grades saved runs, with no predictor or model call: ``python -m ci_triage.evaluation.regrade [DIR ...]``.
 
-DIR is a results directory (``results/<name>[-<mode>]``, from ``evaluation.run`` or ``evaluation.llm_run``);
-with none, every directory under results/ that holds a cases.jsonl. For each saved case, the recorded tool
-calls are replayed offline on a fresh toolkit for the run's mode (the replay source is deterministic, so
-the outputs are the ones the predictor got; a replayed call whose size or availability differs is an
-error), and the saved diagnosis is graded again with grader v1, v2 and v2.1. One-call LLM cases are graded
-against the sections of their saved bundle. The grader a run was saved with (v1 for every run before
-grader v2) must reproduce its saved grades exactly.
+DIR is a results directory (``results/<name>[-<mode>]``, from ``evaluation.run``, ``evaluation.llm_run`` or
+``evaluation.agent_run``); with none, every directory under results/ that holds a cases.jsonl. For each saved
+case, the recorded tool calls are replayed offline on a fresh toolkit for the run's mode (the replay source
+is deterministic, so the outputs are the ones the predictor got; a replayed call whose size or availability
+differs is an error), and the saved diagnosis is graded again with grader v1, v2 and v2.1:
+
+- predictor runs (rules, sanity predictors): against the outputs of their tool calls;
+- one-call LLM runs: against the sections of their saved bundle;
+- agent runs (D6b): as ``agent_run`` grades them, against everything the agent saw (the bundle's sections and
+  its own tool results that were shown to it), with those shown calls as the v2.1 ``seen_calls``.
+
+The grader a run was saved with (v1 for every run before grader v2; v2.1 for the agent runs) must reproduce
+its saved grades exactly.
 
 Writes ``DIR/grader-v2/cases.jsonl`` and ``summary.md``; the saved files are never touched. Only scored
-cases are re-graded (for LLM runs: ``ok`` and ``invalid_output``). A run saved by an older grader, whose
-records lack fields grader v1 now writes (``job_correct`` came with D5c), cannot be reproduced and is
-skipped with a message (``StaleRun``).
+cases are re-graded (for LLM runs: ``ok`` and ``invalid_output``). A run whose records do not parse as
+today's record format for their kind (for example the sanity runs saved before ``job_correct`` came with
+D5c) cannot be reproduced and is skipped with a message naming the format and the missing fields
+(``StaleRun``).
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -38,7 +46,7 @@ OUT_DIR = "grader-v2"
 
 
 class StaleRun(ValueError):
-    """The run was saved by an older grader; its records do not parse as today's results."""
+    """The run's records do not parse as today's record format for their kind (predictor, one-call, agent)."""
 
 
 @dataclass(frozen=True)
@@ -87,24 +95,45 @@ def replay_calls(case: Case, lab: LabData, mode: Mode, recorded: Sequence[ToolCa
     return toolkit.calls
 
 
-def _saved_cases(directory: Path) -> list[tuple[CaseResult, str | None]]:
-    """(saved result, the bundle as sent for one-call LLM cases, else None), scored cases only."""
+@dataclass(frozen=True)
+class _Saved:
+    result: CaseResult
+    message: str | None = None  # the one-call bundle as sent, or the agent's first user turn
+    agent: Any = None  # the AgentCaseRecord, for agent runs
+
+
+def _record_kind(data: dict[str, Any]) -> str:
+    if "llm_calls" not in data:
+        return "predictor"
+    return "agent" if "turns" in data else "one-call"
+
+
+def _saved_cases(directory: Path) -> list[_Saved]:
+    """The saved scored cases, each with what its grading needs besides the tool calls."""
     cases = []
     for line in (directory / "cases.jsonl").read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         data = json.loads(line)
+        kind = _record_kind(data)
         try:
-            if "llm_calls" in data:
+            if kind == "agent":
+                from ci_triage.evaluation.agent_run import AgentCaseRecord  # needs langgraph: only for agent runs
+
+                record = AgentCaseRecord.model_validate(data)
+                if record.status in SCORED and record.result is not None:
+                    cases.append(_Saved(record.result, record.user_message, record))
+            elif kind == "one-call":
                 record = LLMCaseRecord.model_validate(data)
                 if record.status in SCORED and record.result is not None:
-                    cases.append((record.result, record.user_message))
+                    cases.append(_Saved(record.result, record.user_message))
             else:
-                cases.append((CaseResult.model_validate(data), None))
+                cases.append(_Saved(CaseResult.model_validate(data)))
         except ValidationError as exc:
             missing = sorted({".".join(map(str, e["loc"])) for e in exc.errors() if e["type"] == "missing"})
-            raise StaleRun(f"{directory.name} was saved by an older grader (missing: {', '.join(missing) or '?'}); "
-                           "re-run it to grade it") from exc
+            raise StaleRun(f"{directory.name}: its records do not parse as today's {kind} record format "
+                           f"(missing: {', '.join(missing) or 'none; other fields invalid'}), so they cannot be "
+                           "re-graded; re-run it to grade it") from exc
     return cases
 
 
@@ -116,14 +145,24 @@ def regrade_run(directory: Path, lab: LabData | None = None,
     name, mode = parse_results_name(directory.name)
     lab_cases = {case.case_id: case for case in load_cases(lab)}
     stored, v1, v2, v2_1 = [], [], [], []
-    for saved, message in _saved_cases(directory):
+    for case in _saved_cases(directory):
+        saved = case.result
         calls = replay_calls(lab_cases[saved.case_id], lab, mode, saved.calls)
         args = (truth[saved.case_id], saved.diagnosis, calls, saved.error)
-        sections = None if message is None else bundle_sections(message)
+        seen = None
+        if case.agent is not None:  # as agent_run grades it: what the agent saw, and the calls it saw
+            from ci_triage.evaluation.agent_run import seen_sections, shown_calls
+
+            agent = case.agent
+            sections = seen_sections(agent.user_message, calls, agent.bundle_tool_calls, agent.tool_calls)
+            seen = shown_calls(calls, agent.bundle_tool_calls, agent.tool_calls)
+        else:
+            sections = None if case.message is None else bundle_sections(case.message)
         stored.append(saved)
         v1.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v1"))
         v2.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2", sections=sections))
-        v2_1.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2.1", sections=sections))
+        v2_1.append(grade_case(*args, wall_time_s=saved.wall_time_s, grader="v2.1", sections=sections,
+                               seen_calls=seen))
     return Regraded(directory, name, mode, stored, v1, v2, v2_1)
 
 

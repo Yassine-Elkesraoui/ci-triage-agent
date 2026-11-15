@@ -5,6 +5,8 @@ output, so they are skipped where there is none) by replaying the recorded tool 
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from conftest import CASES, LAB, TRUTH
 from oracle import OraclePredictor
@@ -247,6 +249,19 @@ def test_results_names_parse_back(name, mode):
     assert parse_results_name(results_name(name, mode)) == (name, mode)
 
 
+@pytest.mark.parametrize(("directory", "record", "kind"), [
+    ("rules", {"case_id": "inj-011"}, "predictor"),
+    ("one_call_v2-gemini", {"case_id": "inj-011", "llm_calls": []}, "one-call"),
+    ("agent_v1-gemini-log-only", {"case_id": "inj-011", "llm_calls": [], "turns": []}, "agent"),
+])
+def test_unparsable_saved_run_names_its_record_format(tmp_path, directory, record, kind):
+    run = tmp_path / directory
+    run.mkdir()
+    (run / "cases.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(StaleRun, match=rf"do not parse as today's {kind} record format \(missing: [a-z_]+"):
+        regrade_run(run, LAB, TRUTH)
+
+
 # -- every saved run: its grader reproduces it, v2 changes only grounding, quote rules and remove-type fixes ---
 
 SAVED = saved_runs()
@@ -270,8 +285,13 @@ def test_saved_run_its_grader_reproduces_the_saved_summary_byte_for_byte(regrade
     if regraded.name.startswith("one_call"):
         pytest.skip("an LLM run's summary.md also holds the model-call figures")
     saved = (regraded.directory / "summary.md").read_text(encoding="utf-8")
-    summary = regraded.summaries()[0 if regraded.saved_grader == "v1" else 1]
-    assert to_markdown(summary) == saved
+    summary = summarise(regraded.name, regraded.regraded_as_saved, regraded.mode.value)
+    if regraded.name.startswith("agent_"):
+        # agent_run's summary.md holds its agent and model-call figures, then the grader's scores block verbatim
+        block = to_markdown(summary).split("\n", 2)[2]
+        assert f"## Scores (ok and invalid_output cases)\n\n{block}\n" in saved
+    else:
+        assert to_markdown(summary) == saved
 
 
 def test_saved_run_category_job_step_file_identical_under_v1_and_v2(regraded):
