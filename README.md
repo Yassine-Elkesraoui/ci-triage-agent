@@ -115,6 +115,11 @@ Neither `ReplaySource`, the tools, the predictors nor the agent import `ci_triag
   runs up to the eval run (for flaky cases, the earlier reruns of the same code),
   and `compare(baseline, eval)`. Everything else is "not available in this case's
   scope".
+- **Same-commit reruns (phase B, change f).** `list_runs` and `get_run` show every
+  earlier run of the triaged commit created before the triaged run, for every
+  predictor and in both modes. The v1.0 cases have none, so their bundles and tool
+  outputs are unchanged; `tests/test_same_commit_reruns.py` checks all 60, byte for
+  byte, against digests written before the change (`tests/data/replay_v1_0.json`).
 - **No time travel.** Nothing created after the eval run finished is visible.
 - **Redaction.** Commit messages and run titles are `<redacted>`; the lab's own
   `injections/` directory is hidden, and a diff that lost files to it says

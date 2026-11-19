@@ -74,7 +74,13 @@ class ReplaySource:
     - the case's own commits, from the injection commit up to the eval commit
       (for flaky cases, the empty rerun commits too), and their runs up to the
       eval run, including earlier green reruns of the same code;
-    - ``compare(baseline, eval)``, the diff across the case.
+    - ``compare(baseline, eval)``, the diff across the case;
+    - same-commit reruns (phase B, change f): every earlier run of the triaged
+      commit, created before the triaged run, is in scope for ``list_runs`` and
+      ``get_run``, whatever its outcome. They are named here on their own, so
+      they stay in scope whatever the rule for the case's own commits says. The
+      v1.0 cases have none (every v1.0 commit ran once), so their outputs do not
+      change.
 
     Anything else, including other cases' runs and commits, later runs (no time
     travel: nothing created after the eval run finished) and unknown ids,
@@ -101,7 +107,13 @@ class ReplaySource:
         baseline_run = max(green, key=lambda run: (_ts(run["created_at"]), run["id"]))
         self.baseline_commit: str = baseline_run["head_sha"]
         self._baseline_run_id: int = baseline_run["id"]
-        self._run_ids = {self._baseline_run_id} | {
+        triaged_created = _ts(eval_run["created_at"])
+        self.same_commit_reruns: frozenset[int] = frozenset(
+            run["id"] for run in self._lab.listed_runs.values()
+            if run["head_sha"] == case.eval_commit and run["id"] != case.eval_run_id
+            and _ts(run["created_at"]) < triaged_created
+        )
+        self._run_ids = {self._baseline_run_id} | self.same_commit_reruns | {
             run["id"] for run in self._lab.listed_runs.values()
             if run["head_sha"] in self._own_commits and self._before_cutoff(run)
         }
