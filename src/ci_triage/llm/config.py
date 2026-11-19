@@ -15,6 +15,7 @@ from ci_triage.labpaths import REPO_ROOT
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "one_call_v2.toml"
 REPAIR_MARKER = "<!-- REPAIR MESSAGE"
 FINAL_MARKER = "<!-- FINAL TURN MESSAGE"  # agent prompts only: the forced last turn
+TOOL_CALL_ERROR_MARKER = "<!-- TOOL CALL ERROR MESSAGE"  # agent v2 prompts only: a tool call the server could not parse
 
 
 class _Strict(BaseModel):
@@ -94,9 +95,15 @@ class Prompt:
     repair: str  # contains "{errors}"
     sha256: str
     final_turn: str | None = None  # agent prompts: the user turn that asks for the answer now
+    tool_call_error: str | None = None  # agent v2 prompts: the error turn; contains "{error}"
 
     def repair_message(self, errors: str) -> str:
         return self.repair.replace("{errors}", errors)
+
+    def tool_call_error_message(self, error: str) -> str:
+        if self.tool_call_error is None:
+            raise ValueError("this prompt has no TOOL CALL ERROR MESSAGE section")
+        return self.tool_call_error.replace("{error}", error)
 
 
 @dataclass(frozen=True)
@@ -122,7 +129,13 @@ def load_prompt(path: Path) -> Prompt:
     if "{errors}" not in repair:
         raise ValueError(f"{path}: the repair message has no {{errors}} placeholder")
     final = final_rest.split("-->", 1)[1].strip() if final_marker else None
-    return Prompt(system=system.strip(), repair=repair, sha256=_sha(text), final_turn=final)
+    error = None
+    if final is not None and TOOL_CALL_ERROR_MARKER in final:
+        final, _, error_rest = final.partition(TOOL_CALL_ERROR_MARKER)
+        final, error = final.strip(), error_rest.split("-->", 1)[1].strip()
+        if "{error}" not in error:
+            raise ValueError(f"{path}: the tool call error message has no {{error}} placeholder")
+    return Prompt(system=system.strip(), repair=repair, sha256=_sha(text), final_turn=final, tool_call_error=error)
 
 
 def load_config(path: Path | str = DEFAULT_CONFIG) -> LoadedConfig:

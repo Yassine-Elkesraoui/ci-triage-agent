@@ -79,9 +79,10 @@ src/ci_triage/
     clients.py          LLMClient protocol: GeminiClient, OllamaClient, FakeClient (tests)
     calling.py          ModelCaller: pacing, retries with backoff, the daily call cap, per-call records
     schema.py           the Diagnosis JSON schema flattened for constrained output; tool parameter schemas
-  agent/                the D6b tool-using agent (langgraph for the loop only)
-    config.py           its pre-registered settings (configs/agent_v1.toml) and run plan
-    loop.py             ToolAgent: the one-call bundle, then model turns with the toolkit's tools, then a Diagnosis
+  agent/                the tool-using agent (langgraph for the loop only)
+    config.py           its pre-registered settings (configs/agent_v1.toml, agent_v2.toml) and run plan
+    loop.py             ToolAgent (v1, D6b): the one-call bundle, then model turns with the toolkit's tools, then a Diagnosis
+    loop_v2.py          ToolAgentV2 (phase B): v1 with changes a-e; make_agent picks the loop the config names
   evaluation/           the only code that reads ground truth
     ground_truth.py     category, target file, mutation, revert commit (evaluation only)
     key_evidence.py     the evidence each case's failure block must contain
@@ -90,12 +91,13 @@ src/ci_triage/
     metrics.py          summary metrics and the Markdown report
     run.py              runs a predictor over the 60 cases in a mode, writes results/<name>[-log-only]/
     llm_run.py          runs an LLM baseline: resumable, paced, capped; api_error cases left out of scoring
-    agent_run.py        runs the D6b agent the same way, in the pre-registered run-plan order
+    agent_run.py        runs the agent (v1 or v2, by --config) the same way, in the pre-registered run-plan order
     regrade.py          re-grades saved runs offline (no model calls), with grader v1 and v2
-configs/                pre-registered LLM settings (one_call_v1.toml, one_call_v2.toml, agent_v1.toml)
-prompts/                LLM prompts (one_call_v1.md, one_call_v2.md, agent_v1.md)
+configs/                pre-registered LLM settings (one_call_v1.toml, one_call_v2.toml, agent_v1.toml, agent_v2.toml)
+prompts/                LLM prompts (one_call_v1.md, one_call_v2.md, agent_v1.md, agent_v2.md)
 reports/                official scores, committed (results/ is gitignored run output); figures/ for D7
 scripts/plot_d7.py      the D7 accuracy figure, from the saved runs under results/
+scripts/measure_chars_per_token.py  agent v2's characters per token, from the saved agent v1 runs (change e)
 tests/
   oracle.py             the oracle predictor: reads ground truth, so it lives here only
   synthetic.py          a synthetic failing run built in code (not a lab case), for the LLM tests
@@ -286,4 +288,30 @@ output limit, answer schema, validation and repair as D6a.
 python -m ci_triage.evaluation.agent_run --backend gemini --mode log-only            # first, per the plan
 python -m ci_triage.evaluation.agent_run --backend gemini --mode log-only --resume   # after a cap or api_error
 python tests/smoke_agent.py gemini ollama --mode log-only   # live smoke test on the synthetic run
+```
+
+## Phase B: agent v2 (pre-registered, not yet evaluated)
+
+Sealed from `docs/preregistration/phase-b.md`, section 2, changes a to e, in `configs/agent_v2.toml`,
+`prompts/agent_v2.md` and `agent/loop_v2.py`, beside the unchanged v1 files (`--config` picks one; v1 stays
+the default). Same models, temperature, seed, 1,536 output tokens, 8 turns, one repair call and bundle as v1.
+
+- **a. Answer through a tool.** Turns 1-7 offer the mode's tools plus `submit_diagnosis`, whose parameters
+  are the Diagnosis schema. The answer turn offers `submit_diagnosis` only, forced (Gemini, function-calling
+  mode ANY); Ollama cannot force a tool call, so there it gets no tools and the schema-constrained answer. A
+  turn with neither a tool call nor a submission, or an invalid submission, gets the one repair call; still
+  no valid diagnosis: `invalid_output`.
+- **b.** One sentence after the verbatim category definitions: in real_regression, "code" means the
+  application's own source code. A test checks every other difference from `agent_v1.md`.
+- **c.** After the second repeated call in a case, the next turn is the answer turn (`repeat_forced`).
+- **d.** A server error saying it could not parse the model's tool call (`is_unparseable_tool_call`, e.g.
+  Ollama's `XML syntax error ...`) is not retried: the first is shown to the model as an error turn, which
+  counts as a turn; a second is `invalid_output`.
+- **e.** Characters per token per backend, measured on tool JSON in the saved agent v1 runs by
+  `scripts/measure_chars_per_token.py` (low end: Gemini 1.80, Ollama 1.50). Once the server has counted a
+  prompt, the check uses that count plus the estimate for the new content only.
+
+```bash
+python -m ci_triage.evaluation.agent_run --config configs/agent_v2.toml --backend gemini --mode log-only
+python tests/smoke_agent.py gemini ollama --config configs/agent_v2.toml   # live smoke test, synthetic run
 ```

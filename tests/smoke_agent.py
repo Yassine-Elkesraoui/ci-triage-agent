@@ -2,7 +2,7 @@
 collected by pytest. Needs ``pip install -e ".[llm,agent]"``, Ollama running with the model pulled, and
 GEMINI_API_KEY set. Gemini attempts count against the daily cap in results/llm_call_ledger.json.
 
-    python tests/smoke_agent.py [gemini] [ollama] [--mode log-only]
+    python tests/smoke_agent.py [gemini] [ollama] [--mode log-only] [--config configs/agent_v2.toml]
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ import time
 import synthetic as s
 
 from ci_triage.agent.config import load_agent_config
-from ci_triage.agent.loop import ToolAgent
+from ci_triage.agent.loop_v2 import AgentOutcomeV2, make_agent
 from ci_triage.evaluation.agent_run import environment, make_agent_caller, seen_sections
 from ci_triage.evaluation.grader import grade_case
 from ci_triage.evaluation.llm_run import make_client
-from ci_triage.labpaths import RESULTS_DIR
+from ci_triage.labpaths import REPO_ROOT, RESULTS_DIR
 from ci_triage.predictors.base import CaseView
 from ci_triage.tools import Mode
 
@@ -27,14 +27,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("backends", nargs="*", default=["gemini", "ollama"])
     parser.add_argument("--mode", choices=[m.value for m in Mode], default=Mode.LOG_ONLY.value)
+    parser.add_argument("--config", default=str(REPO_ROOT / "configs" / "agent_v1.toml"))
     args = parser.parse_args()
-    loaded = load_agent_config()
+    loaded = load_agent_config(args.config)
     print(f"config {loaded.path.name} sha256 {loaded.sha256[:16]}, prompt sha256 {loaded.prompt.sha256[:16]}, "
           f"bundle config {loaded.config.bundle} sha256 {loaded.bundle.sha256[:16]}, mode {args.mode}, "
           f"synthetic case (run {s.RUN_ID}, not a lab case)")
     for backend in args.backends:
         client = make_client(backend, loaded)
-        agent = ToolAgent(make_agent_caller(client, loaded, RESULTS_DIR), loaded)
+        agent = make_agent(make_agent_caller(client, loaded, RESULTS_DIR), loaded)
         toolkit, _ = s.toolkit(args.mode)
         start = time.perf_counter()
         outcome = agent.run(CaseView(s.RUN_ID), toolkit)
@@ -42,10 +43,15 @@ def main() -> None:
         print(f"\n== {backend}: status {outcome.status}" + (" (repaired)" if outcome.repaired else "")
               + f", {outcome.turns_used} turns, {len(outcome.tool_calls)} tool calls, wall {wall:.1f} s"
               + (", context forced" if outcome.context_forced else "") + (", turn limit" if outcome.max_turns_forced else ""))
+        if isinstance(outcome, AgentOutcomeV2):
+            print(f"v2: answered by {outcome.answered_by}, repeat_forced {outcome.repeat_forced}, "
+                  f"unparseable tool calls {outcome.unparseable_tool_calls}")
         print(f"bundle: {outcome.prompt_chars} chars with the system prompt, {outcome.bundle_tool_calls} toolkit calls")
         for turn in outcome.turns:
             print(f"turn {turn.turn}: tools offered {turn.tools_offered}, forced {turn.forced}, "
-                  f"~{turn.prompt_tokens_estimate} prompt tokens estimated, {turn.tool_calls} tool calls")
+                  f"~{turn.prompt_tokens_estimate} prompt tokens estimated"
+                  + (f" (from the server's count: {turn.server_count_used})" if hasattr(turn, "server_count_used") else "")
+                  + f", {turn.tool_calls} tool calls" + (", submitted" if getattr(turn, "submitted", False) else ""))
             for call in (c for c in outcome.tool_calls if c.turn == turn.turn):
                 print(f"   -> {call.name}({json.dumps(call.arguments)}) -> {call.output_chars} chars, "
                       f"available {call.available}, shown {call.shown}")

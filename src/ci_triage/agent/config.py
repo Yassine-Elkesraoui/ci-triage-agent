@@ -24,19 +24,35 @@ class _Strict(BaseModel):
 
 class AgentSettings(_Strict):
     max_turns: int = Field(ge=1)  # model turns per case, the answer turn included; repair calls are extra
+    loop: Literal["v1", "v2"] = "v1"  # agent_v1.toml has no such key: v1
+    # v2 only: after this many repeated calls in a case, the next model turn is the answer turn (repeat_forced)
+    repeated_calls_to_answer: int | None = Field(None, ge=1)
 
 
 class ContextSettings(_Strict):
     context_tokens: int
     reserve_tokens: int
-    chars_per_token: float
+    # v1: one value for every backend. v2: one per backend tokenizer ({"gemini": .., "ollama": ..}); any other
+    # backend (the tests' fake) gets the lowest, the most conservative.
+    chars_per_token: float | dict[str, float]
+    # v2: once a model call has returned the server's prompt count, the check uses it for the conversation so far
+    # and the estimate for the new content only
+    use_server_count: bool = False
 
     def room(self, max_output_tokens: int) -> int:
         """Prompt tokens a turn may take: the context minus the answer and slack."""
         return self.context_tokens - self.reserve_tokens - max_output_tokens
 
-    def estimate_tokens(self, text: str) -> int:
-        return math.ceil(len(text) / self.chars_per_token)
+    def ratio(self, backend: str | None = None) -> float:
+        if isinstance(self.chars_per_token, float | int):
+            return float(self.chars_per_token)
+        return self.chars_per_token.get(backend or "", min(self.chars_per_token.values()))
+
+    def tokens_for(self, chars: int, backend: str | None = None) -> int:
+        return math.ceil(chars / self.ratio(backend))
+
+    def estimate_tokens(self, text: str, backend: str | None = None) -> int:
+        return self.tokens_for(len(text), backend)
 
 
 class PlannedRun(_Strict):
@@ -62,6 +78,13 @@ class AgentConfig(_Strict):
             raise ValueError("ollama.num_ctx must equal context.context_tokens")
         if len(set(self.run)) != len(self.run):
             raise ValueError("the run plan lists a run twice")
+        v2 = self.agent.loop == "v2"
+        if v2 != (self.agent.repeated_calls_to_answer is not None):
+            raise ValueError("agent.repeated_calls_to_answer is set for the v2 loop, and only for it")
+        if not v2 and (self.context.use_server_count or not isinstance(self.context.chars_per_token, float | int)):
+            raise ValueError("the v1 loop has one chars_per_token and no server count")
+        if v2 and not isinstance(self.context.chars_per_token, dict):
+            raise ValueError("the v2 loop has one chars_per_token per backend")
         return self
 
 
@@ -89,5 +112,7 @@ def load_agent_config(path: Path | str = DEFAULT_AGENT_CONFIG) -> LoadedAgentCon
     prompt = load_prompt(_resolve(config.prompt))
     if prompt.final_turn is None:
         raise ValueError(f"{config.prompt}: an agent prompt needs a FINAL TURN MESSAGE section")
+    if (config.agent.loop == "v2") != (prompt.tool_call_error is not None):
+        raise ValueError(f"{config.prompt}: a v2 agent prompt, and only one, has a TOOL CALL ERROR MESSAGE section")
     return LoadedAgentConfig(config=config, text=text, path=path, sha256=hashlib.sha256(text.encode()).hexdigest(),
                              prompt=prompt, bundle=load_config(_resolve(config.bundle)))

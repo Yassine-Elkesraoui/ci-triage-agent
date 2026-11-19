@@ -49,11 +49,14 @@ class LLMCallRecord(BaseModel):
 
 
 class APIFailure(Exception):
-    """A model call that failed after its retries, or with a status that is not retried."""
+    """A model call that failed after its retries, or with a status that is not retried. ``not_retried``: the
+    caller's ``no_retry`` rule matched the error (agent v2: a tool call the server could not parse)."""
 
-    def __init__(self, record: LLMCallRecord) -> None:
+    def __init__(self, record: LLMCallRecord, error: APICallError | None = None, not_retried: bool = False) -> None:
         super().__init__(record.attempt_errors[-1] if record.attempt_errors else "API failure")
         self.record = record
+        self.error = error
+        self.not_retried = not_retried
 
 
 class DailyCapReached(Exception):
@@ -145,14 +148,19 @@ def scrub(text: str | None, secrets: Sequence[str]) -> str | None:
 
 
 class ModelCaller:
+    """``no_retry`` (agent v2; None for everything else): errors it matches are never retried, whatever their
+    status; the ``APIFailure`` says so with ``not_retried``."""
+
     def __init__(self, client: LLMClient, *, temperature: float, max_output_tokens: int, retry: RetrySettings,
                  context_tokens: int | None = None, pacer: Pacer | None = None, ledger: CallLedger | None = None,
-                 sleep: Callable[[float], None] = time.sleep, secrets: Sequence[str] | None = None) -> None:
+                 sleep: Callable[[float], None] = time.sleep, secrets: Sequence[str] | None = None,
+                 no_retry: Callable[[APICallError], bool] | None = None) -> None:
         self.client = client
         self.temperature, self.max_output_tokens = temperature, max_output_tokens
         self.retry, self.context_tokens = retry, context_tokens
         self.pacer, self.ledger, self.sleep = pacer, ledger, sleep
         self.secrets = list(secrets) if secrets is not None else known_secrets()
+        self.no_retry = no_retry
 
     def call(self, purpose: Literal["diagnose", "repair"], system: str, messages: Sequence[Message],
              schema: dict[str, Any]) -> tuple[LLMResponse, LLMCallRecord]:
@@ -161,11 +169,14 @@ class ModelCaller:
             system, messages, schema, temperature=self.temperature, max_output_tokens=self.max_output_tokens))
 
     def chat(self, purpose: Literal["turn", "answer", "repair"], system: str, messages: Sequence[Message], *,
-             tools: Sequence[ToolSpec] | None, schema: dict[str, Any] | None) -> tuple[LLMResponse, LLMCallRecord]:
-        """Agent request (``LLMClient.chat``), paced, capped and retried exactly like ``call``."""
+             tools: Sequence[ToolSpec] | None, schema: dict[str, Any] | None,
+             force_tool: str | None = None) -> tuple[LLMResponse, LLMCallRecord]:
+        """Agent request (``LLMClient.chat``), paced, capped and retried exactly like ``call``. ``force_tool`` is
+        passed on only when set (agent v2)."""
+        forced = {} if force_tool is None else {"force_tool": force_tool}
         response, record = self._call(purpose, lambda: self.client.chat(
             system, messages, tools=tools, schema=schema, temperature=self.temperature,
-            max_output_tokens=self.max_output_tokens), tools_offered=len(tools or ()))
+            max_output_tokens=self.max_output_tokens, **forced), tools_offered=len(tools or ()))
         record.tool_calls = [scrub(str(c.name), self.secrets)[:100] for c in response.tool_calls]
         return response, record
 
@@ -184,11 +195,13 @@ class ModelCaller:
                 response = request()
             except APICallError as exc:
                 record.attempt_errors.append(scrub(str(exc), self.secrets)[:500])
-                retryable = exc.status in self.retry.statuses and record.attempts < self.retry.max_tries
+                not_retried = self.no_retry is not None and self.no_retry(exc)
+                retryable = (not not_retried and exc.status in self.retry.statuses
+                             and record.attempts < self.retry.max_tries)
                 if not retryable:
                     record.retries = record.attempts - 1
                     record.total_s = time.perf_counter() - start
-                    raise APIFailure(record) from None
+                    raise APIFailure(record, exc, not_retried) from None
                 self.sleep(self.retry.delay(record.attempts))
                 continue
             break

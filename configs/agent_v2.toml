@@ -1,0 +1,84 @@
+# Phase B: agent v2 (docs/preregistration/phase-b.md, section 2, changes a to e; change f is in the replay).
+# Pre-registered settings, committed before any evaluation run. Every report of this agent prints this
+# file verbatim. Changing a value makes a new version (v3); never edit this file after its first evaluation.
+
+name = "agent_v2"
+prompt = "prompts/agent_v2.md"       # agent_v1.md with changes a (answer through submit_diagnosis) and b
+bundle = "configs/one_call_v2.toml"  # the first user turn is exactly this config's bundle for the mode
+
+[agent]
+loop = "v2"
+max_turns = 8                 # model turns per case, the answer turn included; the repair call is extra
+repeated_calls_to_answer = 2  # c: after the second repeated call in a case, the next turn is the answer turn
+# a. Turns 1 to max_turns - 1 offer the mode's tools plus submit_diagnosis, whose parameters are the
+#    Diagnosis JSON schema; calling it is the answer. The answer turn (the last one, or one forced by the
+#    context budget or by repeated calls) offers submit_diagnosis only, as a forced call (Gemini); a backend
+#    that cannot force a tool call (Ollama) gets no tools and the schema-constrained answer instead. A turn
+#    with neither a tool call nor a submission, or a submission that fails validation, gets the one repair
+#    call. Still no valid diagnosis: invalid_output, scored as wrong.
+# c. A repeated call (same tool, same arguments as an earlier call in the case) is answered from the earlier
+#    result, as in v1, and recorded as repeat_forced when it forces the answer.
+# d. A server error saying the server could not parse the model's tool call is not retried. The first in a
+#    case is shown to the model as an error turn, which counts as a turn; a second is invalid_output. Other
+#    errors keep the retry rules below.
+
+[generation]                # both backends
+temperature = 0.0
+max_output_tokens = 1536
+repair_calls = 1            # one repair call per case (see a above); still invalid: invalid_output
+
+[context]                   # both backends, so the two see the same conversations
+context_tokens = 16384      # system prompt, tool definitions, every turn so far and the answer must fit
+reserve_tokens = 256        # chat template and slack, on top of max_output_tokens
+use_server_count = true     # e: once a call has returned the server's prompt count, the check uses it for the
+                            # conversation so far, plus the estimate below for the new content only
+
+# e: characters per token on tool JSON, per backend tokenizer, from the v1.0 development data (the agent v1
+# runs, both modes): the server's prompt tokens against the characters the estimate counts, over the growth
+# of each case's conversation from turn to turn; the low end is the lowest case, rounded down to 0.05.
+# Measured by scripts/measure_chars_per_token.py: Gemini 1.802 (83 cases, 174 steps; median 2.850),
+# Ollama 1.514 (92 cases, 533 steps; median 2.853).
+[context.chars_per_token]
+gemini = 1.80
+ollama = 1.50
+
+[gemini]
+model = "gemini-3.5-flash-lite"
+thinking_level = "minimal"
+seed = 42
+max_requests_per_minute = 10
+daily_call_cap = 450        # attempts per Pacific-time day, retries and repairs included, shared with D6a
+timeout_s = 120
+
+[ollama]
+model = "qwen3.5:4b"
+think = false
+num_ctx = 16384             # = context_tokens
+seed = 42
+host = "http://localhost:11434"
+timeout_s = 600
+
+[retry]
+max_tries = 5               # attempts per model call, the first one included
+statuses = [429, 500, 503, 504]  # a client-side timeout counts as 504; d's parse error is never retried
+backoff_initial_s = 5.0
+backoff_factor = 2.0
+backoff_max_s = 60.0
+
+# The registered run plan, in order. Log-only runs first for each backend: it is the headline condition.
+# The runner refuses a run until every earlier run of the same backend has all its cases scored.
+[[run]]
+backend = "gemini"
+mode = "log-only"
+
+[[run]]
+backend = "gemini"
+mode = "full"
+
+[[run]]
+backend = "ollama"
+mode = "log-only"
+
+[[run]]
+backend = "ollama"
+mode = "full"

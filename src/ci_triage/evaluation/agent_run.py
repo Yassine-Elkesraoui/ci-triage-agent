@@ -1,11 +1,14 @@
-"""Runs the D6b tool-using agent over the lab cases, one case at a time, safe to stop and resume.
+"""Runs the tool-using agent over the lab cases, one case at a time, safe to stop and resume.
 
-``python -m ci_triage.evaluation.agent_run --backend gemini|ollama --mode log-only|full [--resume]``
+``python -m ci_triage.evaluation.agent_run --backend gemini|ollama --mode log-only|full [--config ...] [--resume]``
 
-Settings come from one pre-registered config (default ``configs/agent_v1.toml``), printed at the start of
-every run and verbatim in every summary.md. Like ``llm_run``:
+Settings come from one pre-registered config (default ``configs/agent_v1.toml``; ``configs/agent_v2.toml`` for
+agent v2, whose ``[agent] loop = "v2"`` selects ``loop_v2.ToolAgentV2``), printed at the start of every run and
+verbatim in every summary.md. Agent v2's records add how the answer came (submit_diagnosis or the schema
+answer), repeat_forced and unparseable tool calls, and its turns record whether the context check started from
+the server's count. Like ``llm_run``:
 
-- each case is appended to ``results/agent_v1-<backend>[-<mode>]/cases.jsonl`` as soon as it is done:
+- each case is appended to ``results/<config name>-<backend>[-<mode>]/cases.jsonl`` as soon as it is done:
   status, every model call (model_version, tokens, latency, retries), every turn, every tool call (name,
   arguments, output size, whether it was shown, whether it repeated an earlier call), repeated_calls, the bundle, the environment and, unless api_error, the
   grades; with Ollama, the environment holds the server version and basic hardware facts;
@@ -39,6 +42,7 @@ from pydantic import BaseModel, Field
 
 from ci_triage.agent.config import DEFAULT_AGENT_CONFIG, LoadedAgentConfig, load_agent_config
 from ci_triage.agent.loop import AgentToolCall, Status, ToolAgent, TurnRecord
+from ci_triage.agent.loop_v2 import AgentOutcomeV2, AnsweredBy, ToolAgentV2, TurnRecordV2, make_agent, no_retry_rule
 from ci_triage.diagnosis import EvidenceSource
 from ci_triage.evaluation.grader import DEFAULT_GRADER, GRADERS, CaseResult, GraderVersion, grade_case, tool_sections
 from ci_triage.evaluation.llm_run import LEDGER_FILE, SCORED, EvalCase, lab_cases, make_client
@@ -75,6 +79,19 @@ class AgentCaseRecord(BaseModel):
     environment: dict[str, Any] = Field(default_factory=dict)
     result: CaseResult | None = None  # None for api_error: not scored
     user_message: str = ""
+
+
+class AgentCaseRecordV2(AgentCaseRecord):
+    """A case of agent v2: v1's record, its turns as v2 records them, and v2's own counts."""
+
+    turns: list[TurnRecordV2]
+    answered_by: AnsweredBy | None = None  # a submit_diagnosis call, or the schema-constrained answer
+    repeat_forced: bool = False  # c: the answer turn came after the repeated-call limit
+    unparseable_tool_calls: int = 0  # d: tool calls the server could not parse (a second is invalid_output)
+
+
+def record_type(loaded: LoadedAgentConfig) -> type[AgentCaseRecord]:
+    return AgentCaseRecordV2 if loaded.config.agent.loop == "v2" else AgentCaseRecord
 
 
 @dataclass
@@ -131,19 +148,20 @@ def environment(client: LLMClient) -> dict[str, Any]:
     return info
 
 
-def read_agent_records(path: Path) -> list[AgentCaseRecord]:
+def read_agent_records(path: Path, kind: type[AgentCaseRecord] = AgentCaseRecord) -> list[AgentCaseRecord]:
     if not path.is_file():
         return []
-    return [AgentCaseRecord.model_validate_json(line) for line in path.read_text(encoding="utf-8").splitlines()
+    return [kind.model_validate_json(line) for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip()]
 
 
-def run_cases(agent: ToolAgent, cases: Sequence[EvalCase], directory: Path, *, resume: bool = False,
+def run_cases(agent: ToolAgent | ToolAgentV2, cases: Sequence[EvalCase], directory: Path, *, resume: bool = False,
               mode: Mode | str = Mode.FULL, echo: Callable[[str], None] = print,
               grader: GraderVersion = DEFAULT_GRADER, env: dict[str, Any] | None = None) -> AgentRunReport:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "cases.jsonl"
-    existing = read_agent_records(path)
+    kind = record_type(agent.loaded)
+    existing = read_agent_records(path, kind)
     if existing and not resume:
         raise SystemExit(f"{path} already has {len(existing)} cases; pass --resume to continue it, "
                          "or move it away to start over")
@@ -177,8 +195,11 @@ def run_cases(agent: ToolAgent, cases: Sequence[EvalCase], directory: Path, *, r
             seen = shown_calls(toolkit.calls, outcome.bundle_tool_calls, outcome.tool_calls)
             result = grade_case(case.truth, outcome.diagnosis, toolkit.calls, outcome.error, wall_time_s=elapsed,
                                 grader=grader, sections=sections, seen_calls=seen)
-        record = AgentCaseRecord(
-            case_id=case.case_id, run_id=case.run_id, status=outcome.status, error=outcome.error,
+        extra = {} if not isinstance(outcome, AgentOutcomeV2) else dict(
+            answered_by=outcome.answered_by, repeat_forced=outcome.repeat_forced,
+            unparseable_tool_calls=outcome.unparseable_tool_calls)
+        record = kind(
+            **extra, case_id=case.case_id, run_id=case.run_id, status=outcome.status, error=outcome.error,
             repaired=outcome.repaired, llm_calls=outcome.calls, turns=outcome.turns, turns_used=outcome.turns_used,
             tool_calls=outcome.tool_calls, repeated_calls=outcome.repeated_calls,
             bundle_tool_calls=outcome.bundle_tool_calls,
@@ -204,7 +225,7 @@ def _total(values: Sequence[int | None]) -> int:
     return sum(v for v in values if v is not None)
 
 
-def summary_markdown(agent: ToolAgent, report: AgentRunReport, n_cases: int, mode: Mode) -> str:
+def summary_markdown(agent: ToolAgent | ToolAgentV2, report: AgentRunReport, n_cases: int, mode: Mode) -> str:
     loaded = agent.loaded
     records = report.records
     scored = [r.result for r in records if r.status in SCORED and r.result is not None]
@@ -244,6 +265,7 @@ def summary_markdown(agent: ToolAgent, report: AgentRunReport, n_cases: int, mod
         f"| answer forced by the turn limit | {sum(r.max_turns_forced for r in records)} |",
         f"| context_forced (answer early or results dropped) | {sum(r.context_forced for r in records)} |",
         f"| tool results dropped, never shown | {sum(not t.shown for t in tool_calls)} |",
+        *_v2_rows(records),
         f"| prompt size estimate, max | {max((r.max_prompt_tokens_estimate for r in records), default=0)} tokens |",
         "",
         "## Model calls",
@@ -282,6 +304,22 @@ def summary_markdown(agent: ToolAgent, report: AgentRunReport, n_cases: int, mod
     return "\n".join(lines)
 
 
+def _v2_rows(records: Sequence[AgentCaseRecord]) -> list[str]:
+    """Agent v2's own rows (none for v1, whose summary stays as it was)."""
+    v2 = [r for r in records if isinstance(r, AgentCaseRecordV2)]
+    if not v2:
+        return []
+    how = Counter(r.answered_by for r in v2 if r.answered_by)
+    return [
+        f"| answered by submit_diagnosis / by the schema answer | {how['submit_diagnosis']} / {how['schema']} |",
+        f"| answer forced by repeated calls (repeat_forced) | {sum(r.repeat_forced for r in v2)} |",
+        f"| tool calls the server could not parse (cases) | {sum(r.unparseable_tool_calls for r in v2)} "
+        f"({sum(r.unparseable_tool_calls > 0 for r in v2)}) |",
+        f"| turns whose estimate started from the server's count | "
+        f"{sum(t.server_count_used for r in v2 for t in r.turns)} of {sum(len(r.turns) for r in v2)} |",
+    ]
+
+
 def make_agent_caller(client: LLMClient, loaded: LoadedAgentConfig, results_root: Path,
                       daily_cap: int | None = None) -> ModelCaller:
     c = loaded.config
@@ -293,7 +331,8 @@ def make_agent_caller(client: LLMClient, loaded: LoadedAgentConfig, results_root
     elif daily_cap is not None:
         ledger = CallLedger(results_root / LEDGER_FILE, client.requested_model, daily_cap)
     return ModelCaller(client, temperature=c.generation.temperature, max_output_tokens=c.generation.max_output_tokens,
-                       retry=c.retry, context_tokens=c.context.context_tokens, pacer=pacer, ledger=ledger)
+                       retry=c.retry, context_tokens=c.context.context_tokens, pacer=pacer, ledger=ledger,
+                       no_retry=no_retry_rule(loaded))
 
 
 def run_directory(loaded: LoadedAgentConfig, backend: str, mode: Mode | str, out: Path = RESULTS_DIR) -> Path:
@@ -308,7 +347,7 @@ def check_run_plan(loaded: LoadedAgentConfig, backend: str, mode: Mode | str, ou
     for earlier in plan[:plan.index((backend, Mode(mode).value))]:
         if earlier[0] != backend:
             continue
-        records = read_agent_records(run_directory(loaded, *earlier, out) / "cases.jsonl")
+        records = read_agent_records(run_directory(loaded, *earlier, out) / "cases.jsonl", record_type(loaded))
         scored = sum(r.status in SCORED for r in records)
         if scored < n_cases:
             raise SystemExit(f"run plan: finish {earlier[0]} {earlier[1]} first ({scored}/{n_cases} cases scored)")
@@ -332,7 +371,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"config {loaded.path} (sha256 {loaded.sha256[:16]}), prompt sha256 {loaded.prompt.sha256[:16]}, "
           f"bundle config sha256 {loaded.bundle.sha256[:16]}")
     print(loaded.text)
-    agent = ToolAgent(make_agent_caller(make_client(args.backend, loaded), loaded, args.out, args.daily_cap), loaded)
+    agent = make_agent(make_agent_caller(make_client(args.backend, loaded), loaded, args.out, args.daily_cap), loaded)
     report = run_cases(agent, cases, run_directory(loaded, args.backend, mode, args.out), resume=args.resume,
                        mode=mode, grader=args.grader)
     print(f"{report.ran} cases run, {report.skipped} skipped as done; wrote {report.directory}")

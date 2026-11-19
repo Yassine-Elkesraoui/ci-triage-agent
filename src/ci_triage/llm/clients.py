@@ -91,9 +91,11 @@ class LLMClient(Protocol):
         """One request; the answer is constrained to ``schema`` where the backend supports it."""
 
     def chat(self, system: str, messages: Sequence[Message], *, tools: Sequence[ToolSpec] | None,
-             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int) -> LLMResponse:
+             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int,
+             force_tool: str | None = None) -> LLMResponse:
         """One request of a tool-using conversation: ``tools`` offered for native tool calling (None: none),
-        and/or the answer constrained to ``schema`` (None: free text)."""
+        and/or the answer constrained to ``schema`` (None: free text). ``force_tool`` (agent v2, only where
+        the client's ``can_force_tool_call`` is True): the answer must be a call to that tool."""
 
 
 # -- Gemini ---------------------------------------------------------------------------------------
@@ -103,6 +105,7 @@ class GeminiClient:
     """``generate_content`` with JSON output constrained by ``response_json_schema``."""
 
     backend = "gemini"
+    can_force_tool_call = True  # function_calling_config mode ANY
 
     def __init__(self, model: str, *, thinking_level: str | None = None, seed: int | None = None,
                  timeout_s: float = 120.0) -> None:
@@ -167,7 +170,8 @@ class GeminiClient:
 
 
     def chat(self, system: str, messages: Sequence[Message], *, tools: Sequence[ToolSpec] | None,
-             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int) -> LLMResponse:
+             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int,
+             force_tool: str | None = None) -> LLMResponse:
         types = self._types
         from google.genai import errors
 
@@ -177,6 +181,9 @@ class GeminiClient:
                 types.FunctionDeclaration(name=t.name, description=t.description, parameters_json_schema=t.parameters)
                 for t in tools])]
             extra["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+        if force_tool is not None:
+            extra["tool_config"] = types.ToolConfig(function_calling_config=types.FunctionCallingConfig(
+                mode="ANY", allowed_function_names=[force_tool]))
         if schema is not None:
             extra.update(response_mime_type="application/json", response_json_schema=schema)
         config = types.GenerateContentConfig(
@@ -275,6 +282,7 @@ class OllamaClient:
     """``/api/chat`` with ``format`` set to the JSON schema (grammar-constrained decoding)."""
 
     backend = "ollama"
+    can_force_tool_call = False  # /api/chat cannot require a tool call; agent v2 uses the schema answer instead
 
     def __init__(self, model: str, *, think: bool = False, num_ctx: int = 8192, seed: int = 42,
                  host: str | None = None, timeout_s: float = 600.0) -> None:
@@ -325,7 +333,10 @@ class OllamaClient:
                            finish_reason=response.done_reason)
 
     def chat(self, system: str, messages: Sequence[Message], *, tools: Sequence[ToolSpec] | None,
-             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int) -> LLMResponse:
+             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int,
+             force_tool: str | None = None) -> LLMResponse:
+        if force_tool is not None:
+            raise ValueError("Ollama cannot force a tool call (can_force_tool_call is False)")
         extra: dict[str, Any] = {}
         if tools:
             extra["tools"] = ollama_tools(tools)
@@ -460,6 +471,7 @@ class FakeChatCall:
     schema: dict[str, Any] | None
     temperature: float
     max_output_tokens: int
+    force_tool: str | None = None
 
 
 @dataclass
@@ -473,6 +485,7 @@ class FakeClient:
     backend: str = "fake"
     calls: list[FakeCall] = field(default_factory=list)
     chats: list[FakeChatCall] = field(default_factory=list)
+    can_force_tool_call: bool = True
 
     @classmethod
     def of(cls, items: Iterable[str | Exception], **kwargs: Any) -> FakeClient:
@@ -490,9 +503,12 @@ class FakeClient:
                            tokens_out=len(item) // 4, latency_s=0.0, finish_reason="STOP")
 
     def chat(self, system: str, messages: Sequence[Message], *, tools: Sequence[ToolSpec] | None,
-             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int) -> LLMResponse:
+             schema: dict[str, Any] | None, temperature: float, max_output_tokens: int,
+             force_tool: str | None = None) -> LLMResponse:
+        if force_tool is not None and not self.can_force_tool_call:
+            raise AssertionError("force_tool sent to a client that cannot force a tool call")
         self.chats.append(FakeChatCall(system, list(messages), None if tools is None else list(tools), schema,
-                                       temperature, max_output_tokens))
+                                       temperature, max_output_tokens, force_tool))
         if not self.script:
             raise AssertionError("FakeClient script exhausted")
         item = self.script.pop(0)
