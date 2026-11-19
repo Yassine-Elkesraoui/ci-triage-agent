@@ -74,6 +74,7 @@ src/ci_triage/
   predictors/           predict(CaseView, Toolkit) -> Diagnosis; constant and random baselines
     rules.py            rules-only baseline (no LLM): its decision table is in the module docstring
     llm_once.py         one-call LLM baseline: a fixed evidence bundle, one model call, one repair at most
+    hybrid.py           hybrid v1 (phase B): rules v1 when rules 1-6 fire, else agent v2; the live predictor
   llm/                  LLM backends and calls (google-genai and ollama imported lazily)
     config.py           the pre-registered settings (configs/*.toml) and the prompt file
     clients.py          LLMClient protocol: GeminiClient, OllamaClient, FakeClient (tests)
@@ -93,6 +94,7 @@ src/ci_triage/
     llm_run.py          runs an LLM baseline: resumable, paced, capped; api_error cases left out of scoring
     agent_run.py        runs the agent (v1 or v2, by --config) the same way, in the pre-registered run-plan order
     regrade.py          re-grades saved runs offline (no model calls), with grader v1 and v2
+    hybrid_run.py       scores hybrid v1 by combining saved rules v1 and agent v2 runs, case by case
 configs/                pre-registered LLM settings (one_call_v1.toml, one_call_v2.toml, agent_v1.toml, agent_v2.toml)
 prompts/                LLM prompts (one_call_v1.md, one_call_v2.md, agent_v1.md, agent_v2.md)
 reports/                official scores, committed (results/ is gitignored run output); figures/ for D7
@@ -314,4 +316,24 @@ the default). Same models, temperature, seed, 1,536 output tokens, 8 turns, one 
 ```bash
 python -m ci_triage.evaluation.agent_run --config configs/agent_v2.toml --backend gemini --mode log-only
 python tests/smoke_agent.py gemini ollama --config configs/agent_v2.toml   # live smoke test, synthetic run
+```
+
+## Phase B: hybrid v1 (pre-registered, not yet evaluated)
+
+Rules v1 decide whenever one of their rules 1-6 fires; on their fallback (rule 7), agent v2 decides. The rule
+that fired is read from the rules' own `root_cause` ("Rule 6e (...)"), and `predictors.hybrid.rules_decide` is
+the one place the choice is made.
+
+- **Scored from saved runs**, with no model or tool calls of its own: `evaluation/hybrid_run.py` combines the
+  rules v1 run of a mode with the agent v2 run on the same backend and mode, case by case, and writes
+  `results/hybrid_v1-<backend>[-log-only]/`. Both runs must cover the same cases and use the same grader; an
+  agent case that is api_error is not scored and is listed.
+- **Live**: `HybridPredictor` runs the rules, then agent v2 on a fallback, on the same read-only toolkit. A
+  test checks that both give the same answer, and the same decision, on the synthetic case and on all 60 v1.0
+  cases in both modes (scripted model whose answer depends on the bundle it saw).
+
+```bash
+python -m ci_triage.evaluation.run --predictor rules --mode log-only
+python -m ci_triage.evaluation.agent_run --config configs/agent_v2.toml --backend gemini --mode log-only
+python -m ci_triage.evaluation.hybrid_run --backend gemini --mode log-only
 ```
